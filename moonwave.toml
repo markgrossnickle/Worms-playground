@@ -1,0 +1,21 @@
+title = "Worms Playground"
+gitRepoUrl = "https://github.com/markgrossnickle/Worms-playground"
+
+gitSourceBranch = "main"
+changelog = true
+classOrder = []
+
+[docusaurus]
+onBrokenLinks = "warn"
+onBrokenMarkdownLinks = "warn"
+favicon = "favicon.ico"
+
+# From git:
+organizationName = "MindTrust"
+projectName = "Worms Playground"
+baseUrl = "/Worms-playground"
+tagline = "Worms Playground - Roblox - MINDTRUST"
+
+[footer]
+style = "dark"
+copyright = "MindTrust Labs 2026"
