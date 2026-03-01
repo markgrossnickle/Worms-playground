@@ -1,0 +1,620 @@
+--!strict
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Knit = require(ReplicatedStorage.Packages.Knit)
+local Signal = require(ReplicatedStorage.Packages.Signal)
+local Trove = require(ReplicatedStorage.Packages.Trove)
+local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+local Enums = require(ReplicatedStorage.Shared.Enums)
+
+type WormState = Enums.WormState
+type WormData = {
+	State: WormState,
+	Segments: number,
+	Direction: Vector3,
+	Boosting: boolean,
+	Color: Color3,
+	Kills: number,
+}
+
+local HALF_ARENA = WormConfig.ArenaSize / 2
+
+local WormService = Knit.CreateService({
+	Name = "WormService",
+	Client = {
+		WormSpawned = Knit.CreateSignal(),
+		WormDied = Knit.CreateSignal(),
+		WormAte = Knit.CreateSignal(),
+		FoodSpawned = Knit.CreateSignal(),
+		FoodRemoved = Knit.CreateSignal(),
+		StateSync = Knit.CreateSignal(),
+	},
+
+	_worms = {} :: { [Player]: WormData },
+	_troves = {} :: { [Player]: any },
+	_foodFolder = nil :: Folder?,
+	_wormFolder = nil :: Folder?,
+	_foodCount = 0,
+	_gameLoopConnection = nil :: RBXScriptConnection?,
+
+	-- Signals for other services to listen to
+	PlayerKilled = Signal.new(),
+	PlayerScoreChanged = Signal.new(),
+})
+
+--------------------------------------------------
+-- Private helpers
+--------------------------------------------------
+
+function WormService:_randomArenaPosition(): Vector3
+	local x = math.random(-HALF_ARENA, HALF_ARENA)
+	local z = math.random(-HALF_ARENA, HALF_ARENA)
+	return Vector3.new(x, 1, z)
+end
+
+function WormService:_randomColor(): Color3
+	return Color3.fromHSV(math.random(), 0.8, 0.9)
+end
+
+function WormService:_createArena()
+	local arena = Instance.new("Part")
+	arena.Name = "Arena"
+	arena.Size = Vector3.new(WormConfig.ArenaSize, 1, WormConfig.ArenaSize)
+	arena.Position = Vector3.new(0, -0.5, 0)
+	arena.Anchored = true
+	arena.Material = Enum.Material.SmoothPlastic
+	arena.Color = Color3.fromRGB(30, 30, 30)
+	arena.Parent = workspace
+
+	-- Boundary walls
+	local wallHeight = 20
+	local wallThickness = 4
+	local wallData = {
+		{ Vector3.new(WormConfig.ArenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, HALF_ARENA) },
+		{ Vector3.new(WormConfig.ArenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, -HALF_ARENA) },
+		{ Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize), Vector3.new(HALF_ARENA, wallHeight / 2, 0) },
+		{ Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize), Vector3.new(-HALF_ARENA, wallHeight / 2, 0) },
+	}
+	for i, data in wallData do
+		local wall = Instance.new("Part")
+		wall.Name = "Wall" .. i
+		wall.Size = data[1]
+		wall.Position = data[2]
+		wall.Anchored = true
+		wall.Material = Enum.Material.SmoothPlastic
+		wall.Color = Color3.fromRGB(80, 0, 0)
+		wall.Transparency = 0.5
+		wall.Parent = workspace
+	end
+end
+
+function WormService:_spawnFood()
+	if self._foodCount >= WormConfig.MaxFoodOnMap then
+		return
+	end
+
+	local food = Instance.new("Part")
+	food.Name = "Food"
+	food.Shape = Enum.PartType.Ball
+	food.Size = Vector3.new(1.5, 1.5, 1.5)
+	food.Position = self:_randomArenaPosition()
+	food.Anchored = true
+	food.CanCollide = false
+	food.Material = Enum.Material.Neon
+	food.Color = Color3.fromHSV(math.random(), 0.9, 1)
+	food.Parent = self._foodFolder
+
+	self._foodCount += 1
+	self.Client.FoodSpawned:FireAll(food.Position, food.Color)
+end
+
+function WormService:_spawnFoodBatch(count: number)
+	for _ = 1, count do
+		self:_spawnFood()
+	end
+end
+
+function WormService:_dropFoodFromWorm(player: Player, count: number)
+	local character = player.Character
+	if not character then
+		return
+	end
+	local head = character:FindFirstChild("Head") :: BasePart?
+	if not head then
+		return
+	end
+
+	local basePos = head.Position
+	for _ = 1, count do
+		local offset = Vector3.new(math.random(-20, 20), 0, math.random(-20, 20))
+		local food = Instance.new("Part")
+		food.Name = "Food"
+		food.Shape = Enum.PartType.Ball
+		food.Size = Vector3.new(1.5, 1.5, 1.5)
+		food.Position = basePos + offset
+		food.Anchored = true
+		food.CanCollide = false
+		food.Material = Enum.Material.Neon
+		food.Color = Color3.fromHSV(math.random(), 0.9, 1)
+		food.Parent = self._foodFolder
+		self._foodCount += 1
+	end
+end
+
+function WormService:_setupCharacter(player: Player, character: Model)
+	local humanoid = character:WaitForChild("Humanoid") :: Humanoid
+	humanoid.WalkSpeed = 0
+	humanoid.JumpPower = 0
+	humanoid.JumpHeight = 0
+
+	-- Hide body parts except head
+	for _, part in character:GetChildren() do
+		if part:IsA("BasePart") and part.Name ~= "Head" and part.Name ~= "HumanoidRootPart" then
+			part.Transparency = 1
+			part.CanCollide = false
+		end
+		if part:IsA("Accessory") then
+			local handle = part:FindFirstChild("Handle") :: BasePart?
+			if handle then
+				handle.Transparency = 1
+			end
+		end
+	end
+
+	-- Make head spherical and colored
+	local head = character:FindFirstChild("Head") :: BasePart?
+	if head then
+		local mesh = head:FindFirstChildOfClass("SpecialMesh")
+		if mesh then
+			mesh:Destroy()
+		end
+		head.Shape = Enum.PartType.Ball
+		head.Size = Vector3.new(WormConfig.SegmentSize, WormConfig.SegmentSize, WormConfig.SegmentSize)
+		head.Material = Enum.Material.SmoothPlastic
+
+		local wormData = self._worms[player]
+		if wormData then
+			head.Color = wormData.Color
+		end
+	end
+
+	-- Hide face decal
+	local face = character:FindFirstChild("Head") and character.Head:FindFirstChildOfClass("Decal")
+	if face then
+		face.Transparency = 1
+	end
+
+	-- Create body segments folder under character
+	local segFolder = Instance.new("Folder")
+	segFolder.Name = "WormSegments"
+	segFolder.Parent = character
+
+	local wormData = self._worms[player]
+	if wormData then
+		for i = 1, wormData.Segments do
+			self:_createSegment(character, i, wormData.Color)
+		end
+	end
+end
+
+function WormService:_createSegment(character: Model, index: number, color: Color3): Part
+	local head = character:FindFirstChild("Head") :: BasePart?
+	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+	if not head or not segFolder then
+		error("Cannot create segment: missing Head or WormSegments folder")
+	end
+
+	local seg = Instance.new("Part")
+	seg.Name = "Segment" .. index
+	seg.Shape = Enum.PartType.Ball
+	seg.Size = Vector3.new(WormConfig.SegmentSize, WormConfig.SegmentSize, WormConfig.SegmentSize)
+	seg.Position = head.Position - Vector3.new(0, 0, index * WormConfig.SegmentSpacing)
+	seg.Anchored = true
+	seg.CanCollide = false
+	seg.Material = Enum.Material.SmoothPlastic
+	seg.Color = color
+	seg.Parent = segFolder
+
+	return seg
+end
+
+--------------------------------------------------
+-- Worm lifecycle
+--------------------------------------------------
+
+function WormService:_spawnWorm(player: Player)
+	local wormData = self._worms[player]
+	if not wormData then
+		return
+	end
+
+	wormData.State = "Alive" :: WormState
+	wormData.Segments = WormConfig.InitialSegments
+	wormData.Direction = Vector3.new(0, 0, -1)
+	wormData.Boosting = false
+	wormData.Kills = 0
+
+	-- Respawn character at random arena position
+	local spawnPos = self:_randomArenaPosition()
+	player.RespawnLocation = nil
+	player:LoadCharacter()
+
+	local character = player.Character or player.CharacterAdded:Wait()
+	local hrp = character:WaitForChild("HumanoidRootPart") :: BasePart
+	hrp.CFrame = CFrame.new(spawnPos)
+
+	self:_setupCharacter(player, character)
+
+	self.Client.WormSpawned:Fire(player, {
+		Segments = wormData.Segments,
+		Color = { wormData.Color.R, wormData.Color.G, wormData.Color.B },
+		Position = { spawnPos.X, spawnPos.Y, spawnPos.Z },
+	})
+end
+
+function WormService:_killWorm(player: Player, killer: Player?)
+	local wormData = self._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	local segmentsToDrop = math.floor(wormData.Segments * 0.7)
+	self:_dropFoodFromWorm(player, segmentsToDrop)
+
+	wormData.State = "Dead" :: WormState
+
+	-- Credit killer
+	if killer and killer ~= player then
+		local killerData = self._worms[killer]
+		if killerData then
+			killerData.Kills += 1
+		end
+		self.PlayerKilled:Fire(killer, player)
+	end
+
+	self.Client.WormDied:FireAll(player.Name, if killer then killer.Name else nil)
+
+	-- Clean up character segments
+	local character = player.Character
+	if character then
+		local segFolder = character:FindFirstChild("WormSegments")
+		if segFolder then
+			segFolder:Destroy()
+		end
+		local humanoid = character:FindFirstChild("Humanoid") :: Humanoid?
+		if humanoid then
+			humanoid.Health = 0
+		end
+	end
+
+	-- Respawn after delay
+	task.delay(WormConfig.RespawnDelay, function()
+		if player.Parent and self._worms[player] then
+			self:_spawnWorm(player)
+		end
+	end)
+end
+
+--------------------------------------------------
+-- Game loop
+--------------------------------------------------
+
+function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
+	local wormData = self._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	local foodFolder = self._foodFolder :: Folder
+	for _, food in foodFolder:GetChildren() do
+		if food:IsA("BasePart") then
+			local dist = (food.Position - headPos).Magnitude
+			if dist < WormConfig.CollisionRadius + 1 then
+				food:Destroy()
+				self._foodCount -= 1
+				wormData.Segments += WormConfig.FoodValue
+
+				-- Add new segment to character
+				local character = player.Character
+				if character then
+					self:_createSegment(character, wormData.Segments, wormData.Color)
+				end
+
+				self.Client.WormAte:Fire(player, wormData.Segments)
+				self.PlayerScoreChanged:Fire(player, wormData.Segments)
+			end
+		end
+	end
+end
+
+function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
+	local wormData = self._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	for otherPlayer, otherData in self._worms do
+		if otherPlayer == player or otherData.State ~= "Alive" then
+			continue
+		end
+
+		local otherChar = otherPlayer.Character
+		if not otherChar then
+			continue
+		end
+
+		local segFolder = otherChar:FindFirstChild("WormSegments") :: Folder?
+		if not segFolder then
+			continue
+		end
+
+		for _, seg in segFolder:GetChildren() do
+			if seg:IsA("BasePart") then
+				local dist = (seg.Position - headPos).Magnitude
+				if dist < WormConfig.CollisionRadius * 2 then
+					self:_killWorm(player, otherPlayer)
+					return
+				end
+			end
+		end
+	end
+end
+
+function WormService:_checkBounds(player: Player, headPos: Vector3)
+	if math.abs(headPos.X) > HALF_ARENA or math.abs(headPos.Z) > HALF_ARENA then
+		self:_killWorm(player, nil)
+	end
+end
+
+function WormService:_updateSegments(player: Player)
+	local wormData = self._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local head = character:FindFirstChild("Head") :: BasePart?
+	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+	if not head or not segFolder then
+		return
+	end
+
+	-- Collect positions: head is first, then each segment follows the one before it
+	local prevPos = head.Position
+	for i = 1, wormData.Segments do
+		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
+		if seg then
+			local toTarget = prevPos - seg.Position
+			local dist = toTarget.Magnitude
+			if dist > WormConfig.SegmentSpacing then
+				seg.Position = prevPos - toTarget.Unit * WormConfig.SegmentSpacing
+			end
+			prevPos = seg.Position
+		end
+	end
+end
+
+function WormService:_updateMovement(player: Player, dt: number)
+	local wormData = self._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local head = character:FindFirstChild("Head") :: BasePart?
+	if not hrp or not head then
+		return
+	end
+
+	-- Handle boosting
+	local speed = WormConfig.BaseSpeed
+	if wormData.Boosting and wormData.Segments > WormConfig.MinBoostSegments then
+		speed = WormConfig.BoostSpeed
+		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
+		wormData.Segments = math.max(WormConfig.MinBoostSegments, wormData.Segments - segmentsToLose)
+
+		-- Remove excess segments
+		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+		if segFolder then
+			local targetCount = math.floor(wormData.Segments)
+			for _, seg in segFolder:GetChildren() do
+				local idx = tonumber(string.match(seg.Name, "%d+"))
+				if idx and idx > targetCount then
+					seg:Destroy()
+				end
+			end
+		end
+	end
+
+	-- Move head in direction
+	local dir = wormData.Direction
+	local move = dir * speed * dt
+	local newPos = hrp.Position + move
+	newPos = Vector3.new(newPos.X, 1, newPos.Z) -- Keep on ground
+
+	hrp.CFrame = CFrame.new(newPos, newPos + dir)
+	head.CFrame = CFrame.new(newPos, newPos + dir)
+end
+
+function WormService:_gameStep(dt: number)
+	-- Spawn food to maintain target count
+	local foodDeficit = WormConfig.MaxFoodOnMap - self._foodCount
+	if foodDeficit > 0 then
+		local toSpawn = math.min(foodDeficit, 10) -- Spawn up to 10 per frame
+		self:_spawnFoodBatch(toSpawn)
+	end
+
+	-- Update all alive worms
+	for player, wormData in self._worms do
+		if wormData.State ~= "Alive" then
+			continue
+		end
+
+		local character = player.Character
+		if not character then
+			continue
+		end
+
+		local head = character:FindFirstChild("Head") :: BasePart?
+		if not head then
+			continue
+		end
+
+		self:_updateMovement(player, dt)
+		self:_updateSegments(player)
+
+		local headPos = head.Position
+		self:_checkFoodCollection(player, headPos)
+		self:_checkWormCollisions(player, headPos)
+		self:_checkBounds(player, headPos)
+	end
+end
+
+--------------------------------------------------
+-- Client methods
+--------------------------------------------------
+
+function WormService.Client:SetDirection(player: Player, dirX: number, dirZ: number)
+	local wormData = self.Server._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	local dir = Vector3.new(dirX, 0, dirZ)
+	if dir.Magnitude > 0 then
+		wormData.Direction = dir.Unit
+	end
+end
+
+function WormService.Client:SetBoosting(player: Player, boosting: boolean)
+	local wormData = self.Server._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	wormData.Boosting = boosting
+end
+
+function WormService.Client:GetLeaderboard(_player: Player): { { Name: string, Segments: number } }
+	local board = {}
+	for p, data in self.Server._worms do
+		if data.State == "Alive" then
+			table.insert(board, { Name = p.Name, Segments = math.floor(data.Segments) })
+		end
+	end
+	table.sort(board, function(a, b)
+		return a.Segments > b.Segments
+	end)
+	return board
+end
+
+function WormService.Client:GetWormData(player: Player): { Segments: number, State: string }?
+	local wormData = self.Server._worms[player]
+	if not wormData then
+		return nil
+	end
+	return { Segments = math.floor(wormData.Segments), State = wormData.State }
+end
+
+--------------------------------------------------
+-- Knit lifecycle
+--------------------------------------------------
+
+function WormService:KnitInit()
+	self._foodFolder = Instance.new("Folder")
+	self._foodFolder.Name = "Food"
+	self._foodFolder.Parent = workspace
+
+	self._wormFolder = Instance.new("Folder")
+	self._wormFolder.Name = "Worms"
+	self._wormFolder.Parent = workspace
+end
+
+function WormService:KnitStart()
+	self:_createArena()
+	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)
+
+	-- Handle players joining
+	Players.PlayerAdded:Connect(function(player: Player)
+		local trove = Trove.new()
+		self._troves[player] = trove
+
+		self._worms[player] = {
+			State = "Dead" :: WormState,
+			Segments = WormConfig.InitialSegments,
+			Direction = Vector3.new(0, 0, -1),
+			Boosting = false,
+			Color = self:_randomColor(),
+			Kills = 0,
+		}
+
+		trove:Connect(player.CharacterAdded, function(character: Model)
+			task.wait(0.1) -- Let character load
+			if self._worms[player] and self._worms[player].State == "Alive" then
+				self:_setupCharacter(player, character)
+			end
+		end)
+
+		self:_spawnWorm(player)
+	end)
+
+	-- Handle players leaving
+	Players.PlayerRemoving:Connect(function(player: Player)
+		local wormData = self._worms[player]
+		if wormData and wormData.State == "Alive" then
+			self:_dropFoodFromWorm(player, math.floor(wormData.Segments * 0.5))
+		end
+		self._worms[player] = nil
+
+		local trove = self._troves[player]
+		if trove then
+			trove:Destroy()
+			self._troves[player] = nil
+		end
+	end)
+
+	-- Existing players (Studio)
+	for _, player in Players:GetPlayers() do
+		task.spawn(function()
+			local trove = Trove.new()
+			self._troves[player] = trove
+
+			self._worms[player] = {
+				State = "Dead" :: WormState,
+				Segments = WormConfig.InitialSegments,
+				Direction = Vector3.new(0, 0, -1),
+				Boosting = false,
+				Color = self:_randomColor(),
+				Kills = 0,
+			}
+
+			trove:Connect(player.CharacterAdded, function(character: Model)
+				task.wait(0.1)
+				if self._worms[player] and self._worms[player].State == "Alive" then
+					self:_setupCharacter(player, character)
+				end
+			end)
+
+			self:_spawnWorm(player)
+		end)
+	end
+
+	-- Start game loop
+	self._gameLoopConnection = RunService.Heartbeat:Connect(function(dt: number)
+		self:_gameStep(dt)
+	end)
+end
+
+return WormService
