@@ -2,6 +2,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
 local Trove = require(ReplicatedStorage.Packages.Trove)
@@ -25,6 +26,7 @@ local WormUIController = Knit.CreateController({
 	_killFeedFrame = nil :: Frame?,
 	_leaderboardFrame = nil :: Frame?,
 	_minimapFrame = nil :: Frame?,
+	_boostButton = nil :: ImageButton?,
 	_wormService = nil :: any,
 	_wormController = nil :: any,
 })
@@ -82,6 +84,7 @@ function WormUIController:_buildUI()
 	self:_buildKillFeed(gui)
 	self:_buildLeaderboard(gui)
 	self:_buildMinimap(gui)
+	self:_buildBoostButton(gui)
 end
 
 function WormUIController:_buildSegmentCounter(parent: ScreenGui)
@@ -234,6 +237,71 @@ function WormUIController:_buildMinimap(parent: ScreenGui)
 	stroke.Color = Color3.fromRGB(100, 100, 100)
 	stroke.Thickness = 1
 	stroke.Parent = frame
+
+	-- Shift minimap up on touch devices to make room for boost button
+	if UserInputService.TouchEnabled then
+		frame.Position = UDim2.new(1, -10, 1, -120)
+	end
+end
+
+function WormUIController:_buildBoostButton(parent: ScreenGui)
+	if not UserInputService.TouchEnabled then
+		return
+	end
+
+	local button = Instance.new("ImageButton")
+	button.Name = "BoostButton"
+	button.Size = UDim2.new(0, 100, 0, 100)
+	button.Position = UDim2.new(1, -30, 1, -10)
+	button.AnchorPoint = Vector2.new(1, 1)
+	button.BackgroundColor3 = Color3.fromRGB(255, 170, 0)
+	button.BackgroundTransparency = 0.3
+	button.BorderSizePixel = 0
+	button.Image = ""
+	button.AutoButtonColor = false
+	button.Parent = parent
+	self._boostButton = button
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = button
+
+	local boostStroke = Instance.new("UIStroke")
+	boostStroke.Color = Color3.fromRGB(255, 200, 50)
+	boostStroke.Thickness = 3
+	boostStroke.Parent = button
+
+	createTextLabel({
+		Name = "Label",
+		Text = "BOOST",
+		Size = UDim2.fromScale(1, 1),
+		Position = UDim2.fromScale(0, 0),
+		TextSize = 20,
+		Font = Enum.Font.GothamBold,
+		TextColor3 = Color3.new(1, 1, 1),
+		Parent = button,
+	})
+
+	-- Wire press/release to WormController boost
+	button.InputBegan:Connect(function(input: InputObject)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			button.BackgroundTransparency = 0.1
+			button.BackgroundColor3 = Color3.fromRGB(255, 220, 50)
+			if self._wormController then
+				self._wormController:SetBoosting(true)
+			end
+		end
+	end)
+
+	button.InputEnded:Connect(function(input: InputObject)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			button.BackgroundTransparency = 0.3
+			button.BackgroundColor3 = Color3.fromRGB(255, 170, 0)
+			if self._wormController then
+				self._wormController:SetBoosting(false)
+			end
+		end
+	end)
 end
 
 --------------------------------------------------

@@ -29,6 +29,8 @@ local WormController = Knit.CreateController({
 	_boosting = false,
 	_segments = WormConfig.InitialSegments,
 	_alive = false,
+	_touchPosition = nil :: Vector2?,
+	_isTouchDevice = false,
 })
 
 --------------------------------------------------
@@ -61,8 +63,18 @@ end
 --------------------------------------------------
 
 function WormController:_getWorldDirection(): Vector3?
-	local mouse = LocalPlayer:GetMouse()
-	local ray = Camera:ScreenPointToRay(mouse.X, mouse.Y)
+	-- Determine screen position: use tracked touch position on mobile, mouse otherwise
+	local screenX, screenY
+	if self._isTouchDevice and self._touchPosition then
+		screenX = self._touchPosition.X
+		screenY = self._touchPosition.Y
+	else
+		local mouse = LocalPlayer:GetMouse()
+		screenX = mouse.X
+		screenY = mouse.Y
+	end
+
+	local ray = Camera:ScreenPointToRay(screenX, screenY)
 
 	-- Intersect ray with ground plane (Y = 1)
 	local planeY = 1
@@ -96,46 +108,45 @@ function WormController:_getWorldDirection(): Vector3?
 end
 
 function WormController:_setupInput()
-	-- Boost: hold left mouse button or Shift
+	self._isTouchDevice = UserInputService.TouchEnabled
+
+	-- Keyboard/mouse boost: hold Shift or left mouse button
 	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
 		if processed then
 			return
 		end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.LeftShift then
-			self._boosting = true
-			if self._wormService then
-				self._wormService:SetBoosting(true)
-			end
+			self:SetBoosting(true)
 		end
 	end)
 
 	self._trove:Connect(UserInputService.InputEnded, function(input: InputObject, _processed: boolean)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.LeftShift then
-			self._boosting = false
-			if self._wormService then
-				self._wormService:SetBoosting(false)
+			self:SetBoosting(false)
+		end
+	end)
+
+	-- Touch direction tracking: update position on touch start, move, and clear on end
+	if self._isTouchDevice then
+		self._trove:Connect(UserInputService.TouchStarted, function(touch: InputObject, processed: boolean)
+			if processed then
+				return
 			end
-		end
-	end)
+			self._touchPosition = Vector2.new(touch.Position.X, touch.Position.Y)
+		end)
 
-	-- Touch boost (mobile)
-	self._trove:Connect(UserInputService.TouchStarted, function(_touch: InputObject, processed: boolean)
-		if processed then
-			return
-		end
-		self._boosting = true
-		if self._wormService then
-			self._wormService:SetBoosting(true)
-		end
-	end)
+		self._trove:Connect(UserInputService.TouchMoved, function(touch: InputObject, processed: boolean)
+			if processed then
+				return
+			end
+			self._touchPosition = Vector2.new(touch.Position.X, touch.Position.Y)
+		end)
 
-	self._trove:Connect(UserInputService.TouchEnded, function()
-		self._boosting = false
-		if self._wormService then
-			self._wormService:SetBoosting(false)
-		end
-	end)
+		self._trove:Connect(UserInputService.TouchEnded, function()
+			self._touchPosition = nil
+		end)
+	end
 end
 
 --------------------------------------------------
@@ -200,6 +211,13 @@ end
 
 function WormController:IsBoosting(): boolean
 	return self._boosting
+end
+
+function WormController:SetBoosting(boosting: boolean)
+	self._boosting = boosting
+	if self._wormService then
+		self._wormService:SetBoosting(boosting)
+	end
 end
 
 --------------------------------------------------
