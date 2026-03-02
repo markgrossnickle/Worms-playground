@@ -18,9 +18,18 @@ type WormData = {
 	Boosting: boolean,
 	Color: Color3,
 	Kills: number,
+	PositionHistory: { [number]: Vector3 },
+	HistoryStart: number,
+	HistoryEnd: number,
+	LastRecordedPos: Vector3,
 }
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
+
+-- Position history: record a position every MIN_RECORD_DISTANCE studs.
+-- Each segment reads ENTRIES_PER_SEGMENT entries behind the head in the buffer.
+local MIN_RECORD_DISTANCE = 0.5
+local ENTRIES_PER_SEGMENT = math.ceil(WormConfig.SegmentSpacing / MIN_RECORD_DISTANCE)
 
 local WormService = Knit.CreateService({
 	Name = "WormService",
@@ -60,6 +69,12 @@ function WormService:_randomColor(): Color3
 end
 
 function WormService:_createArena()
+	-- Remove default Studio baseplate to avoid z-fighting
+	local baseplate = workspace:FindFirstChild("Baseplate")
+	if baseplate then
+		baseplate:Destroy()
+	end
+
 	local arena = Instance.new("Part")
 	arena.Name = "Arena"
 	arena.Size = Vector3.new(WormConfig.ArenaSize, 1, WormConfig.ArenaSize)
@@ -155,12 +170,22 @@ function WormService:_setupCharacter(player: Player, character: Model)
 		return
 	end
 
+	-- Clean up any existing worm visuals (prevents duplicate from CharacterAdded double-call)
+	local existingHead = character:FindFirstChild("WormHead")
+	if existingHead then
+		existingHead:Destroy()
+	end
+	local existingSegs = character:FindFirstChild("WormSegments")
+	if existingSegs then
+		existingSegs:Destroy()
+	end
+
 	-- Anchor HRP so server CFrame sets are authoritative (no physics fighting)
 	hrp.Anchored = true
 
 	-- Hide all character parts, accessories, and decals
 	for _, desc in character:GetDescendants() do
-		if desc:IsA("BasePart") and desc.Name ~= "HumanoidRootPart" then
+		if desc:IsA("BasePart") then
 			desc.Transparency = 1
 			desc.CanCollide = false
 		elseif desc:IsA("Decal") then
@@ -190,12 +215,13 @@ function WormService:_setupCharacter(player: Player, character: Model)
 
 	if wormData then
 		for i = 1, wormData.Segments do
-			self:_createSegment(character, i, color)
+			self:_createSegment(character, player, i, color)
 		end
 	end
 end
 
-function WormService:_createSegment(character: Model, index: number, color: Color3): Part
+function WormService:_createSegment(character: Model, player: Player, index: number, color: Color3): Part
+	local wormData = self._worms[player]
 	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
 	if not hrp or not segFolder then
@@ -206,14 +232,65 @@ function WormService:_createSegment(character: Model, index: number, color: Colo
 	seg.Name = "Segment" .. index
 	seg.Shape = Enum.PartType.Ball
 	seg.Size = Vector3.new(WormConfig.SegmentSize, WormConfig.SegmentSize, WormConfig.SegmentSize)
-	seg.Position = hrp.Position - Vector3.new(0, 0, index * WormConfig.SegmentSpacing)
 	seg.Anchored = true
 	seg.CanCollide = false
 	seg.Material = Enum.Material.SmoothPlastic
 	seg.Color = color
-	seg.Parent = segFolder
 
+	-- Position from history if available, otherwise behind head in current direction
+	if wormData and wormData.HistoryEnd >= wormData.HistoryStart then
+		local histIndex = wormData.HistoryEnd - index * ENTRIES_PER_SEGMENT
+		if histIndex >= wormData.HistoryStart and wormData.PositionHistory[histIndex] then
+			seg.Position = wormData.PositionHistory[histIndex]
+		else
+			seg.Position = hrp.Position - wormData.Direction * (index * WormConfig.SegmentSpacing)
+		end
+	else
+		seg.Position = hrp.Position - Vector3.new(0, 0, index * WormConfig.SegmentSpacing)
+	end
+
+	seg.Parent = segFolder
 	return seg
+end
+
+--------------------------------------------------
+-- Position history
+--------------------------------------------------
+
+function WormService:_initPositionHistory(wormData: WormData, spawnPos: Vector3)
+	wormData.PositionHistory = {}
+	wormData.HistoryStart = 1
+	wormData.HistoryEnd = 0
+
+	-- Seed with positions trailing behind spawn in the initial direction
+	local numEntries = (WormConfig.InitialSegments + 1) * ENTRIES_PER_SEGMENT
+	for j = numEntries, 0, -1 do
+		local behindDist = j * MIN_RECORD_DISTANCE
+		local pos = spawnPos - wormData.Direction * behindDist
+		wormData.HistoryEnd += 1
+		wormData.PositionHistory[wormData.HistoryEnd] = Vector3.new(pos.X, 1, pos.Z)
+	end
+
+	wormData.LastRecordedPos = spawnPos
+end
+
+function WormService:_recordPosition(wormData: WormData, pos: Vector3)
+	local distMoved = (pos - wormData.LastRecordedPos).Magnitude
+	if distMoved < MIN_RECORD_DISTANCE then
+		return
+	end
+
+	wormData.HistoryEnd += 1
+	wormData.PositionHistory[wormData.HistoryEnd] = pos
+	wormData.LastRecordedPos = pos
+
+	-- Trim old entries we no longer need
+	local maxEntries = (math.ceil(wormData.Segments) + 2) * ENTRIES_PER_SEGMENT
+	local trimTo = wormData.HistoryEnd - maxEntries
+	while wormData.HistoryStart <= trimTo do
+		wormData.PositionHistory[wormData.HistoryStart] = nil
+		wormData.HistoryStart += 1
+	end
 end
 
 --------------------------------------------------
@@ -240,6 +317,9 @@ function WormService:_spawnWorm(player: Player)
 	local character = player.Character or player.CharacterAdded:Wait()
 	local hrp = character:WaitForChild("HumanoidRootPart") :: BasePart
 	hrp.CFrame = CFrame.new(spawnPos)
+
+	-- Initialize position history before setting up character (so segments can read from it)
+	self:_initPositionHistory(wormData, spawnPos)
 
 	self:_setupCharacter(player, character)
 
@@ -319,7 +399,7 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 				-- Add new segment to character
 				local character = player.Character
 				if character then
-					self:_createSegment(character, wormData.Segments, wormData.Color)
+					self:_createSegment(character, player, math.floor(wormData.Segments), wormData.Color)
 				end
 
 				self.Client.WormAte:Fire(player, wormData.Segments)
@@ -352,8 +432,8 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 
 		for _, seg in segFolder:GetChildren() do
 			if seg:IsA("BasePart") then
-				local dist = (seg.Position - headPos).Magnitude
-				if dist < WormConfig.CollisionRadius * 2 then
+				local segDist = (seg.Position - headPos).Magnitude
+				if segDist < WormConfig.CollisionRadius * 2 then
 					self:_killWorm(player, otherPlayer)
 					return
 				end
@@ -379,23 +459,22 @@ function WormService:_updateSegments(player: Player)
 		return
 	end
 
-	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-	if not hrp or not segFolder then
+	if not segFolder then
 		return
 	end
 
-	-- Collect positions: HRP (worm head) is first, then each segment follows the one before it
-	local prevPos = hrp.Position
-	for i = 1, wormData.Segments do
+	-- Place each segment at the position the head was at (index * ENTRIES_PER_SEGMENT) entries ago
+	local segCount = math.floor(wormData.Segments)
+	for i = 1, segCount do
 		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
-		if seg then
-			local toTarget = prevPos - seg.Position
-			local dist = toTarget.Magnitude
-			if dist > WormConfig.SegmentSpacing then
-				seg.Position = prevPos - toTarget.Unit * WormConfig.SegmentSpacing
-			end
-			prevPos = seg.Position
+		if not seg then
+			continue
+		end
+
+		local histIndex = wormData.HistoryEnd - i * ENTRIES_PER_SEGMENT
+		if histIndex >= wormData.HistoryStart and wormData.PositionHistory[histIndex] then
+			seg.Position = wormData.PositionHistory[histIndex]
 		end
 	end
 end
@@ -450,6 +529,9 @@ function WormService:_updateMovement(player: Player, dt: number)
 	if wormHead then
 		wormHead.CFrame = newCFrame
 	end
+
+	-- Record position in history for segment following
+	self:_recordPosition(wormData, newPos)
 end
 
 function WormService:_gameStep(dt: number)
@@ -546,6 +628,21 @@ function WormService:KnitInit()
 	self._wormFolder.Parent = workspace
 end
 
+local function newWormData(color: Color3): WormData
+	return {
+		State = "Dead" :: WormState,
+		Segments = WormConfig.InitialSegments,
+		Direction = Vector3.new(0, 0, -1),
+		Boosting = false,
+		Color = color,
+		Kills = 0,
+		PositionHistory = {},
+		HistoryStart = 1,
+		HistoryEnd = 0,
+		LastRecordedPos = Vector3.zero,
+	}
+end
+
 function WormService:KnitStart()
 	self:_createArena()
 	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)
@@ -555,17 +652,14 @@ function WormService:KnitStart()
 		local trove = Trove.new()
 		self._troves[player] = trove
 
-		self._worms[player] = {
-			State = "Dead" :: WormState,
-			Segments = WormConfig.InitialSegments,
-			Direction = Vector3.new(0, 0, -1),
-			Boosting = false,
-			Color = self:_randomColor(),
-			Kills = 0,
-		}
+		self._worms[player] = newWormData(self:_randomColor())
 
 		trove:Connect(player.CharacterAdded, function(character: Model)
 			task.wait(0.1) -- Let character load
+			-- Skip if _spawnWorm already set up this character (prevents double-call)
+			if character:FindFirstChild("WormHead") then
+				return
+			end
 			if self._worms[player] and self._worms[player].State == "Alive" then
 				self:_setupCharacter(player, character)
 			end
@@ -595,17 +689,13 @@ function WormService:KnitStart()
 			local trove = Trove.new()
 			self._troves[player] = trove
 
-			self._worms[player] = {
-				State = "Dead" :: WormState,
-				Segments = WormConfig.InitialSegments,
-				Direction = Vector3.new(0, 0, -1),
-				Boosting = false,
-				Color = self:_randomColor(),
-				Kills = 0,
-			}
+			self._worms[player] = newWormData(self:_randomColor())
 
 			trove:Connect(player.CharacterAdded, function(character: Model)
 				task.wait(0.1)
+				if character:FindFirstChild("WormHead") then
+					return
+				end
 				if self._worms[player] and self._worms[player].State == "Alive" then
 					self:_setupCharacter(player, character)
 				end
