@@ -404,17 +404,16 @@ function WormUIController:_updateLeaderboard()
 	end
 
 	-- Add top 10
-	for i, entry in board do
-		if i > 10 then
-			break
-		end
+	for i = 1, math.min(#board, 10) do
+		local entry = board[i]
+		local segments = tonumber(entry.Segments) or 0
 
 		local isLocal = entry.Name == LocalPlayer.Name
 		local color = if isLocal then Color3.fromRGB(255, 255, 100) else Color3.new(1, 1, 1)
 
 		createTextLabel({
 			Name = "Entry" .. i,
-			Text = i .. ". " .. entry.Name .. " - " .. entry.Segments,
+			Text = i .. ". " .. entry.Name .. " - " .. segments,
 			Size = UDim2.new(1, -8, 0, 20),
 			Position = UDim2.new(0, 4, 0, 0),
 			TextSize = 13,
@@ -446,12 +445,12 @@ function WormUIController:_updateMinimap()
 			continue
 		end
 
-		local head = character:FindFirstChild("Head") :: BasePart?
-		if not head then
+		local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if not hrp then
 			continue
 		end
 
-		local pos = head.Position
+		local pos = hrp.Position
 		local nx = (pos.X + halfArena) / WormConfig.ArenaSize
 		local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
 
