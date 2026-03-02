@@ -1,0 +1,653 @@
+--!strict
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Knit = require(ReplicatedStorage.Packages.Knit)
+local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+
+local WormService -- Set in KnitStart via require
+
+local HALF_ARENA = WormConfig.ArenaSize / 2
+local MIN_RECORD_DISTANCE = 0.5
+local ENTRIES_PER_SEGMENT = math.ceil(WormConfig.SegmentSpacing / MIN_RECORD_DISTANCE)
+
+local TARGET_TOTAL_WORMS = 8
+local FOOD_SEEK_RANGE = 30
+local FLEE_RANGE = 20
+local CHASE_RANGE = 15
+local DIRECTION_CHANGE_MIN = 1
+local DIRECTION_CHANGE_MAX = 3
+local BOOST_CHANCE = 0.1
+local BOOST_DURATION_MIN = 0.5
+local BOOST_DURATION_MAX = 2
+local SPAWN_CHECK_INTERVAL = 2
+
+local BOT_NAMES = {
+	"Slinky",
+	"Noodle",
+	"Zigzag",
+	"Speedy",
+	"Wiggle",
+	"Slither",
+	"Chompy",
+	"Fang",
+	"Viper",
+	"Cobra",
+	"Python",
+	"Mamba",
+	"Sidewinder",
+	"Rattler",
+	"Coil",
+	"Twister",
+	"Squirm",
+	"Crawler",
+	"Glider",
+	"Snapper",
+}
+
+type BotData = {
+	Name: string,
+	Model: Model,
+	State: string,
+	Segments: number,
+	Direction: Vector3,
+	Boosting: boolean,
+	Color: Color3,
+	PositionHistory: { [number]: Vector3 },
+	HistoryStart: number,
+	HistoryEnd: number,
+	LastRecordedPos: Vector3,
+	NextDirectionChange: number,
+	BoostEndTime: number,
+}
+
+local BotService = Knit.CreateService({
+	Name = "BotService",
+	Client = {},
+
+	_bots = {} :: { [string]: BotData },
+	_usedNames = {} :: { [string]: boolean },
+})
+
+--------------------------------------------------
+-- Helpers
+--------------------------------------------------
+
+local function randomArenaPosition(): Vector3
+	local x = math.random(-HALF_ARENA + 50, HALF_ARENA - 50)
+	local z = math.random(-HALF_ARENA + 50, HALF_ARENA - 50)
+	return Vector3.new(x, 1, z)
+end
+
+local function randomColor(): Color3
+	return Color3.fromHSV(math.random(), 0.8, 0.9)
+end
+
+local function randomDirection(): Vector3
+	local angle = math.random() * math.pi * 2
+	return Vector3.new(math.cos(angle), 0, math.sin(angle)).Unit
+end
+
+--------------------------------------------------
+-- Bot model creation
+--------------------------------------------------
+
+function BotService:_createBotModel(name: string, color: Color3, spawnPos: Vector3): Model
+	local model = Instance.new("Model")
+	model.Name = name
+
+	local hrp = Instance.new("Part")
+	hrp.Name = "HumanoidRootPart"
+	hrp.Size = Vector3.new(2, 2, 2)
+	hrp.Transparency = 1
+	hrp.Anchored = true
+	hrp.CanCollide = false
+	hrp.CFrame = CFrame.new(spawnPos)
+	hrp.Parent = model
+	model.PrimaryPart = hrp
+
+	local headSize = WormConfig.SegmentSize + 0.5
+	local wormHead = Instance.new("Part")
+	wormHead.Name = "WormHead"
+	wormHead.Shape = Enum.PartType.Ball
+	wormHead.Size = Vector3.new(headSize, headSize, headSize)
+	wormHead.Color = color
+	wormHead.Material = Enum.Material.Neon
+	wormHead.Transparency = 0
+	wormHead.Anchored = true
+	wormHead.CanCollide = false
+	wormHead.CFrame = CFrame.new(spawnPos)
+	wormHead.Parent = model
+
+	local segFolder = Instance.new("Folder")
+	segFolder.Name = "WormSegments"
+	segFolder.Parent = model
+
+	model.Parent = workspace
+	return model
+end
+
+function BotService:_createSegment(botData: BotData, index: number)
+	local model = botData.Model
+	local hrp = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+	if not hrp or not segFolder then
+		return
+	end
+
+	local seg = Instance.new("Part")
+	seg.Name = "Segment" .. index
+	seg.Shape = Enum.PartType.Ball
+	seg.Size = Vector3.new(WormConfig.SegmentSize, WormConfig.SegmentSize, WormConfig.SegmentSize)
+	seg.Anchored = true
+	seg.CanCollide = false
+	seg.Material = Enum.Material.SmoothPlastic
+	seg.Color = botData.Color
+
+	if botData.HistoryEnd >= botData.HistoryStart then
+		local histIndex = botData.HistoryEnd - index * ENTRIES_PER_SEGMENT
+		if histIndex >= botData.HistoryStart and botData.PositionHistory[histIndex] then
+			seg.Position = botData.PositionHistory[histIndex]
+		else
+			seg.Position = hrp.Position - botData.Direction * (index * WormConfig.SegmentSpacing)
+		end
+	else
+		seg.Position = hrp.Position - Vector3.new(0, 0, index * WormConfig.SegmentSpacing)
+	end
+
+	seg.Parent = segFolder
+end
+
+--------------------------------------------------
+-- Position history
+--------------------------------------------------
+
+function BotService:_initPositionHistory(botData: BotData, spawnPos: Vector3)
+	botData.PositionHistory = {}
+	botData.HistoryStart = 1
+	botData.HistoryEnd = 0
+
+	local numEntries = (WormConfig.InitialSegments + 1) * ENTRIES_PER_SEGMENT
+	for j = numEntries, 0, -1 do
+		local behindDist = j * MIN_RECORD_DISTANCE
+		local pos = spawnPos - botData.Direction * behindDist
+		botData.HistoryEnd += 1
+		botData.PositionHistory[botData.HistoryEnd] = Vector3.new(pos.X, 1, pos.Z)
+	end
+
+	botData.LastRecordedPos = spawnPos
+end
+
+function BotService:_recordPosition(botData: BotData, pos: Vector3)
+	local distMoved = (pos - botData.LastRecordedPos).Magnitude
+	if distMoved < MIN_RECORD_DISTANCE then
+		return
+	end
+
+	botData.HistoryEnd += 1
+	botData.PositionHistory[botData.HistoryEnd] = pos
+	botData.LastRecordedPos = pos
+
+	local maxEntries = (math.ceil(botData.Segments) + 2) * ENTRIES_PER_SEGMENT
+	local trimTo = botData.HistoryEnd - maxEntries
+	while botData.HistoryStart <= trimTo do
+		botData.PositionHistory[botData.HistoryStart] = nil
+		botData.HistoryStart += 1
+	end
+end
+
+--------------------------------------------------
+-- Bot lifecycle
+--------------------------------------------------
+
+function BotService:_pickBotName(): string
+	for _, name in BOT_NAMES do
+		if not self._usedNames[name] then
+			self._usedNames[name] = true
+			return name
+		end
+	end
+	local name = "Bot" .. math.random(1000, 9999)
+	self._usedNames[name] = true
+	return name
+end
+
+function BotService:_spawnBot()
+	local name = self:_pickBotName()
+	local color = randomColor()
+	local spawnPos = randomArenaPosition()
+	local direction = randomDirection()
+
+	local model = self:_createBotModel(name, color, spawnPos)
+
+	local botData: BotData = {
+		Name = name,
+		Model = model,
+		State = "Alive",
+		Segments = WormConfig.InitialSegments,
+		Direction = direction,
+		Boosting = false,
+		Color = color,
+		PositionHistory = {},
+		HistoryStart = 1,
+		HistoryEnd = 0,
+		LastRecordedPos = Vector3.zero,
+		NextDirectionChange = os.clock() + math.random() * DIRECTION_CHANGE_MAX + DIRECTION_CHANGE_MIN,
+		BoostEndTime = 0,
+	}
+
+	self:_initPositionHistory(botData, spawnPos)
+
+	for i = 1, WormConfig.InitialSegments do
+		self:_createSegment(botData, i)
+	end
+
+	self._bots[name] = botData
+	WormService:RegisterBot(name, model, botData.Segments)
+end
+
+function BotService:_killBot(botName: string, killerName: string?)
+	local botData = self._bots[botName]
+	if not botData or botData.State ~= "Alive" then
+		return
+	end
+
+	botData.State = "Dead"
+
+	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if hrp then
+		local segmentsToDrop = math.floor(botData.Segments * 0.7)
+		WormService:DropFoodAtPosition(hrp.Position, segmentsToDrop)
+	end
+
+	WormService:FireBotDeath(botName, killerName)
+	WormService:UnregisterBot(botName)
+	botData.Model:Destroy()
+
+	self._usedNames[botName] = nil
+	self._bots[botName] = nil
+end
+
+--------------------------------------------------
+-- AI decision making
+--------------------------------------------------
+
+function BotService:_findNearestFood(botPos: Vector3): Vector3?
+	local foodFolder = WormService._foodFolder :: Folder?
+	if not foodFolder then
+		return nil
+	end
+
+	local nearestDist = FOOD_SEEK_RANGE
+	local nearestPos: Vector3? = nil
+
+	for _, food in foodFolder:GetChildren() do
+		if food:IsA("BasePart") then
+			local dist = (food.Position - botPos).Magnitude
+			if dist < nearestDist then
+				nearestDist = dist
+				nearestPos = food.Position
+			end
+		end
+	end
+
+	return nearestPos
+end
+
+function BotService:_findNearestWormThreat(botName: string, botPos: Vector3, botSegments: number): (Vector3?, boolean)
+	local fleeTarget: Vector3? = nil
+	local fleeDist = FLEE_RANGE
+	local chaseTarget: Vector3? = nil
+	local chaseDist = CHASE_RANGE
+
+	-- Check player worms
+	for player, wormData in WormService._worms do
+		if wormData.State ~= "Alive" then
+			continue
+		end
+		local char = player.Character
+		if not char then
+			continue
+		end
+		local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if not hrp then
+			continue
+		end
+
+		local dist = (hrp.Position - botPos).Magnitude
+		if wormData.Segments > botSegments and dist < fleeDist then
+			fleeDist = dist
+			fleeTarget = hrp.Position
+		elseif wormData.Segments < botSegments * 0.7 and dist < chaseDist then
+			chaseDist = dist
+			chaseTarget = hrp.Position
+		end
+	end
+
+	-- Check other bots
+	for otherName, otherData in self._bots do
+		if otherName == botName or otherData.State ~= "Alive" then
+			continue
+		end
+		local otherHrp = otherData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if not otherHrp then
+			continue
+		end
+
+		local dist = (otherHrp.Position - botPos).Magnitude
+		if otherData.Segments > botSegments and dist < fleeDist then
+			fleeDist = dist
+			fleeTarget = otherHrp.Position
+		elseif otherData.Segments < botSegments * 0.7 and dist < chaseDist then
+			chaseDist = dist
+			chaseTarget = otherHrp.Position
+		end
+	end
+
+	if fleeTarget then
+		return fleeTarget, true
+	elseif chaseTarget then
+		return chaseTarget, false
+	end
+
+	return nil, false
+end
+
+function BotService:_updateAI(botData: BotData, now: number)
+	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	local botPos = hrp.Position
+
+	-- Wall avoidance (highest priority)
+	local margin = 50
+	local awayDir = Vector3.zero
+	if botPos.X > HALF_ARENA - margin then
+		awayDir += Vector3.new(-1, 0, 0)
+	elseif botPos.X < -HALF_ARENA + margin then
+		awayDir += Vector3.new(1, 0, 0)
+	end
+	if botPos.Z > HALF_ARENA - margin then
+		awayDir += Vector3.new(0, 0, -1)
+	elseif botPos.Z < -HALF_ARENA + margin then
+		awayDir += Vector3.new(0, 0, 1)
+	end
+
+	if awayDir.Magnitude > 0 then
+		botData.Direction = awayDir.Unit
+		botData.NextDirectionChange = now + 0.5
+		return
+	end
+
+	-- Flee larger worms / chase smaller worms
+	local threatPos, shouldFlee = self:_findNearestWormThreat(botData.Name, botPos, botData.Segments)
+	if threatPos then
+		local diff = (threatPos - botPos) * Vector3.new(1, 0, 1)
+		if diff.Magnitude > 0.1 then
+			if shouldFlee then
+				botData.Direction = (-diff).Unit
+				if botData.Segments > WormConfig.MinBoostSegments + 2 and not botData.Boosting then
+					botData.Boosting = true
+					botData.BoostEndTime = now
+						+ BOOST_DURATION_MIN
+						+ math.random() * (BOOST_DURATION_MAX - BOOST_DURATION_MIN)
+				end
+			else
+				botData.Direction = diff.Unit
+			end
+			botData.NextDirectionChange = now + 0.3
+			return
+		end
+	end
+
+	-- Seek nearby food
+	local foodPos = self:_findNearestFood(botPos)
+	if foodPos then
+		local diff = (foodPos - botPos) * Vector3.new(1, 0, 1)
+		if diff.Magnitude > 0.1 then
+			botData.Direction = diff.Unit
+			botData.NextDirectionChange = now + 0.5
+			return
+		end
+	end
+
+	-- Random wander
+	if now >= botData.NextDirectionChange then
+		botData.Direction = randomDirection()
+		botData.NextDirectionChange = now
+			+ DIRECTION_CHANGE_MIN
+			+ math.random() * (DIRECTION_CHANGE_MAX - DIRECTION_CHANGE_MIN)
+
+		if math.random() < BOOST_CHANCE and botData.Segments > WormConfig.MinBoostSegments + 2 then
+			botData.Boosting = true
+			botData.BoostEndTime = now + BOOST_DURATION_MIN + math.random() * (BOOST_DURATION_MAX - BOOST_DURATION_MIN)
+		end
+	end
+
+	-- Stop boosting after duration
+	if botData.Boosting and now >= botData.BoostEndTime then
+		botData.Boosting = false
+	end
+end
+
+--------------------------------------------------
+-- Movement and game logic
+--------------------------------------------------
+
+function BotService:_updateBotMovement(botData: BotData, dt: number)
+	local model = botData.Model
+	local hrp = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	local speed = WormConfig.BaseSpeed
+	if botData.Boosting and botData.Segments > WormConfig.MinBoostSegments then
+		speed = WormConfig.BoostSpeed
+		local prevFloor = math.floor(botData.Segments)
+		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
+		botData.Segments = math.max(WormConfig.MinBoostSegments, botData.Segments - segmentsToLose)
+		local newFloor = math.floor(botData.Segments)
+
+		if newFloor < prevFloor then
+			local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+			if segFolder then
+				for _, seg in segFolder:GetChildren() do
+					local idx = tonumber(string.match(seg.Name, "%d+"))
+					if idx and idx > newFloor then
+						seg:Destroy()
+					end
+				end
+			end
+			WormService:UpdateBotSegments(botData.Name, newFloor)
+		end
+	else
+		botData.Boosting = false
+	end
+
+	local dir = botData.Direction
+	local move = dir * speed * dt
+	local newPos = hrp.Position + move
+	newPos = Vector3.new(newPos.X, 1, newPos.Z)
+
+	local newCFrame = CFrame.new(newPos, newPos + dir)
+	hrp.CFrame = newCFrame
+
+	local wormHead = model:FindFirstChild("WormHead") :: BasePart?
+	if wormHead then
+		wormHead.CFrame = newCFrame
+	end
+
+	self:_recordPosition(botData, newPos)
+end
+
+function BotService:_updateBotSegments(botData: BotData)
+	local model = botData.Model
+	local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+	if not segFolder then
+		return
+	end
+
+	local segCount = math.floor(botData.Segments)
+	for i = 1, segCount do
+		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
+		if not seg then
+			continue
+		end
+
+		local histIndex = botData.HistoryEnd - i * ENTRIES_PER_SEGMENT
+		if histIndex >= botData.HistoryStart and botData.PositionHistory[histIndex] then
+			seg.Position = botData.PositionHistory[histIndex]
+		end
+	end
+end
+
+function BotService:_checkBotFoodCollection(botData: BotData)
+	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	local headPos = hrp.Position
+	local foodFolder = WormService._foodFolder :: Folder?
+	if not foodFolder then
+		return
+	end
+
+	for _, food in foodFolder:GetChildren() do
+		if food:IsA("BasePart") then
+			local dist = (food.Position - headPos).Magnitude
+			if dist < WormConfig.CollisionRadius + 1 then
+				WormService:ConsumeFood(food)
+				botData.Segments += WormConfig.FoodValue
+				self:_createSegment(botData, math.floor(botData.Segments))
+				WormService:UpdateBotSegments(botData.Name, math.floor(botData.Segments))
+			end
+		end
+	end
+end
+
+function BotService:_checkBotCollisions(botData: BotData)
+	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	local headPos = hrp.Position
+
+	-- Check against player segments
+	for player, wormData in WormService._worms do
+		if wormData.State ~= "Alive" then
+			continue
+		end
+		local char = player.Character
+		if not char then
+			continue
+		end
+		local segFolder = char:FindFirstChild("WormSegments") :: Folder?
+		if not segFolder then
+			continue
+		end
+
+		for _, seg in segFolder:GetChildren() do
+			if seg:IsA("BasePart") then
+				local segDist = (seg.Position - headPos).Magnitude
+				if segDist < WormConfig.CollisionRadius * 2 then
+					self:_killBot(botData.Name, player.Name)
+					return
+				end
+			end
+		end
+	end
+
+	-- Check against other bot segments
+	for otherName, otherData in self._bots do
+		if otherName == botData.Name or otherData.State ~= "Alive" then
+			continue
+		end
+		local segFolder = otherData.Model:FindFirstChild("WormSegments") :: Folder?
+		if not segFolder then
+			continue
+		end
+
+		for _, seg in segFolder:GetChildren() do
+			if seg:IsA("BasePart") then
+				local segDist = (seg.Position - headPos).Magnitude
+				if segDist < WormConfig.CollisionRadius * 2 then
+					self:_killBot(botData.Name, otherName)
+					return
+				end
+			end
+		end
+	end
+
+	-- Check bounds
+	if math.abs(headPos.X) > HALF_ARENA or math.abs(headPos.Z) > HALF_ARENA then
+		self:_killBot(botData.Name, nil)
+	end
+end
+
+--------------------------------------------------
+-- Knit lifecycle
+--------------------------------------------------
+
+function BotService:KnitInit() end
+
+function BotService:KnitStart()
+	WormService = require(script.Parent.WormService)
+
+	-- Spawn management loop
+	task.spawn(function()
+		-- Small delay to let WormService finish initializing
+		task.wait(1)
+
+		while true do
+			local playerCount = #Players:GetPlayers()
+			local botCount = 0
+			for _ in self._bots do
+				botCount += 1
+			end
+
+			local totalWorms = playerCount + botCount
+			local botsNeeded = TARGET_TOTAL_WORMS - totalWorms
+
+			for _ = 1, math.max(0, botsNeeded) do
+				self:_spawnBot()
+			end
+
+			task.wait(SPAWN_CHECK_INTERVAL)
+		end
+	end)
+
+	-- Game loop for bot movement and AI
+	RunService.Heartbeat:Connect(function(dt: number)
+		local now = os.clock()
+
+		-- Collect bot names first to avoid modifying table during iteration
+		local botNames = {}
+		for name, botData in self._bots do
+			if botData.State == "Alive" then
+				table.insert(botNames, name)
+			end
+		end
+
+		for _, name in botNames do
+			local botData = self._bots[name]
+			if not botData or botData.State ~= "Alive" then
+				continue
+			end
+
+			self:_updateAI(botData, now)
+			self:_updateBotMovement(botData, dt)
+			self:_updateBotSegments(botData)
+			self:_checkBotFoodCollection(botData)
+			self:_checkBotCollisions(botData)
+		end
+	end)
+end
+
+return BotService

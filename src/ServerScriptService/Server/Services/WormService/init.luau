@@ -48,6 +48,7 @@ local WormService = Knit.CreateService({
 	_wormFolder = nil :: Folder?,
 	_foodCount = 0,
 	_gameLoopConnection = nil :: RBXScriptConnection?,
+	_botModels = {} :: { [string]: { Model: Model, Segments: number } },
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -342,7 +343,7 @@ function WormService:_spawnWorm(player: Player)
 	})
 end
 
-function WormService:_killWorm(player: Player, killer: Player?)
+function WormService:_killWorm(player: Player, killer: Player?, killerBotName: string?)
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
 		return
@@ -362,7 +363,8 @@ function WormService:_killWorm(player: Player, killer: Player?)
 		self.PlayerKilled:Fire(killer, player)
 	end
 
-	self.Client.WormDied:FireAll(player.Name, if killer then killer.Name else nil)
+	local killerDisplayName = if killer then killer.Name elseif killerBotName then killerBotName else nil
+	self.Client.WormDied:FireAll(player.Name, killerDisplayName)
 
 	-- Clean up character visuals
 	local character = player.Character
@@ -427,6 +429,7 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 		return
 	end
 
+	-- Check against other player segments
 	for otherPlayer, otherData in self._worms do
 		if otherPlayer == player or otherData.State ~= "Alive" then
 			continue
@@ -447,6 +450,24 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 				local segDist = (seg.Position - headPos).Magnitude
 				if segDist < WormConfig.CollisionRadius * 2 then
 					self:_killWorm(player, otherPlayer)
+					return
+				end
+			end
+		end
+	end
+
+	-- Check against bot segments
+	for botName, botInfo in self._botModels do
+		local segFolder = botInfo.Model:FindFirstChild("WormSegments") :: Folder?
+		if not segFolder then
+			continue
+		end
+
+		for _, seg in segFolder:GetChildren() do
+			if seg:IsA("BasePart") then
+				local segDist = (seg.Position - headPos).Magnitude
+				if segDist < WormConfig.CollisionRadius * 2 then
+					self:_killWorm(player, nil, botName)
 					return
 				end
 			end
@@ -585,6 +606,51 @@ function WormService:_gameStep(dt: number)
 end
 
 --------------------------------------------------
+-- Bot integration (called by BotService)
+--------------------------------------------------
+
+function WormService:RegisterBot(name: string, model: Model, segments: number)
+	self._botModels[name] = { Model = model, Segments = segments }
+end
+
+function WormService:UnregisterBot(name: string)
+	self._botModels[name] = nil
+end
+
+function WormService:UpdateBotSegments(name: string, segments: number)
+	local bot = self._botModels[name]
+	if bot then
+		bot.Segments = segments
+	end
+end
+
+function WormService:ConsumeFood(food: BasePart)
+	food:Destroy()
+	self._foodCount -= 1
+end
+
+function WormService:DropFoodAtPosition(position: Vector3, count: number)
+	for _ = 1, count do
+		local offset = Vector3.new(math.random(-20, 20), 0, math.random(-20, 20))
+		local food = Instance.new("Part")
+		food.Name = "Food"
+		food.Shape = Enum.PartType.Ball
+		food.Size = Vector3.new(1.5, 1.5, 1.5)
+		food.Position = position + offset
+		food.Anchored = true
+		food.CanCollide = false
+		food.Material = Enum.Material.Neon
+		food.Color = Color3.fromHSV(math.random(), 0.9, 1)
+		food.Parent = self._foodFolder
+		self._foodCount += 1
+	end
+end
+
+function WormService:FireBotDeath(botName: string, killerName: string?)
+	self.Client.WormDied:FireAll(botName, killerName)
+end
+
+--------------------------------------------------
 -- Client methods
 --------------------------------------------------
 
@@ -615,6 +681,10 @@ function WormService.Client:GetLeaderboard(_player: Player): { { Name: string, S
 		if data.State == "Alive" then
 			table.insert(board, { Name = p.Name, Segments = math.floor(data.Segments) })
 		end
+	end
+	-- Include bots in leaderboard
+	for botName, botInfo in self.Server._botModels do
+		table.insert(board, { Name = botName, Segments = math.floor(botInfo.Segments) })
 	end
 	table.sort(board, function(a, b)
 		return a.Segments > b.Segments
