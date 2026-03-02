@@ -122,12 +122,12 @@ function WormService:_dropFoodFromWorm(player: Player, count: number)
 	if not character then
 		return
 	end
-	local head = character:FindFirstChild("Head") :: BasePart?
-	if not head then
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
 		return
 	end
 
-	local basePos = head.Position
+	local basePos = hrp.Position
 	for _ = 1, count do
 		local offset = Vector3.new(math.random(-20, 20), 0, math.random(-20, 20))
 		local food = Instance.new("Part")
@@ -150,68 +150,63 @@ function WormService:_setupCharacter(player: Player, character: Model)
 	humanoid.JumpPower = 0
 	humanoid.JumpHeight = 0
 
-	-- Hide body parts except head
-	for _, part in character:GetChildren() do
-		if part:IsA("BasePart") and part.Name ~= "Head" and part.Name ~= "HumanoidRootPart" then
-			part.Transparency = 1
-			part.CanCollide = false
-		end
-		if part:IsA("Accessory") then
-			local handle = part:FindFirstChild("Handle") :: BasePart?
-			if handle then
-				handle.Transparency = 1
-			end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	-- Anchor HRP so server CFrame sets are authoritative (no physics fighting)
+	hrp.Anchored = true
+
+	-- Hide all character parts, accessories, and decals
+	for _, desc in character:GetDescendants() do
+		if desc:IsA("BasePart") and desc.Name ~= "HumanoidRootPart" then
+			desc.Transparency = 1
+			desc.CanCollide = false
+		elseif desc:IsA("Decal") then
+			desc.Transparency = 1
 		end
 	end
 
-	-- Make head spherical and colored
-	local head = character:FindFirstChild("Head") :: BasePart?
-	if head then
-		local mesh = head:FindFirstChildOfClass("SpecialMesh")
-		if mesh then
-			mesh:Destroy()
-		end
-		head.Shape = Enum.PartType.Ball
-		head.Size = Vector3.new(WormConfig.SegmentSize, WormConfig.SegmentSize, WormConfig.SegmentSize)
-		head.Material = Enum.Material.SmoothPlastic
+	local wormData = self._worms[player]
+	local color = if wormData then wormData.Color else Color3.new(1, 1, 1)
 
-		local wormData = self._worms[player]
-		if wormData then
-			head.Color = wormData.Color
-		end
-	end
-
-	-- Hide face decal
-	local face = character:FindFirstChild("Head") and character.Head:FindFirstChildOfClass("Decal")
-	if face then
-		face.Transparency = 1
-	end
+	-- Create visual worm head as a new ball Part (avoids R15 MeshPart Shape crash)
+	local wormHead = Instance.new("Part")
+	wormHead.Name = "WormHead"
+	wormHead.Shape = Enum.PartType.Ball
+	wormHead.Size = Vector3.new(WormConfig.SegmentSize, WormConfig.SegmentSize, WormConfig.SegmentSize)
+	wormHead.Color = color
+	wormHead.Material = Enum.Material.SmoothPlastic
+	wormHead.Anchored = true
+	wormHead.CanCollide = false
+	wormHead.CFrame = hrp.CFrame
+	wormHead.Parent = character
 
 	-- Create body segments folder under character
 	local segFolder = Instance.new("Folder")
 	segFolder.Name = "WormSegments"
 	segFolder.Parent = character
 
-	local wormData = self._worms[player]
 	if wormData then
 		for i = 1, wormData.Segments do
-			self:_createSegment(character, i, wormData.Color)
+			self:_createSegment(character, i, color)
 		end
 	end
 end
 
 function WormService:_createSegment(character: Model, index: number, color: Color3): Part
-	local head = character:FindFirstChild("Head") :: BasePart?
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-	if not head or not segFolder then
-		error("Cannot create segment: missing Head or WormSegments folder")
+	if not hrp or not segFolder then
+		error("Cannot create segment: missing HumanoidRootPart or WormSegments folder")
 	end
 
 	local seg = Instance.new("Part")
 	seg.Name = "Segment" .. index
 	seg.Shape = Enum.PartType.Ball
 	seg.Size = Vector3.new(WormConfig.SegmentSize, WormConfig.SegmentSize, WormConfig.SegmentSize)
-	seg.Position = head.Position - Vector3.new(0, 0, index * WormConfig.SegmentSpacing)
+	seg.Position = hrp.Position - Vector3.new(0, 0, index * WormConfig.SegmentSpacing)
 	seg.Anchored = true
 	seg.CanCollide = false
 	seg.Material = Enum.Material.SmoothPlastic
@@ -277,12 +272,16 @@ function WormService:_killWorm(player: Player, killer: Player?)
 
 	self.Client.WormDied:FireAll(player.Name, if killer then killer.Name else nil)
 
-	-- Clean up character segments
+	-- Clean up character visuals
 	local character = player.Character
 	if character then
 		local segFolder = character:FindFirstChild("WormSegments")
 		if segFolder then
 			segFolder:Destroy()
+		end
+		local wormHead = character:FindFirstChild("WormHead")
+		if wormHead then
+			wormHead:Destroy()
 		end
 		local humanoid = character:FindFirstChild("Humanoid") :: Humanoid?
 		if humanoid then
@@ -380,14 +379,14 @@ function WormService:_updateSegments(player: Player)
 		return
 	end
 
-	local head = character:FindFirstChild("Head") :: BasePart?
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-	if not head or not segFolder then
+	if not hrp or not segFolder then
 		return
 	end
 
-	-- Collect positions: head is first, then each segment follows the one before it
-	local prevPos = head.Position
+	-- Collect positions: HRP (worm head) is first, then each segment follows the one before it
+	local prevPos = hrp.Position
 	for i = 1, wormData.Segments do
 		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
 		if seg then
@@ -413,8 +412,7 @@ function WormService:_updateMovement(player: Player, dt: number)
 	end
 
 	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	local head = character:FindFirstChild("Head") :: BasePart?
-	if not hrp or not head then
+	if not hrp then
 		return
 	end
 
@@ -438,14 +436,20 @@ function WormService:_updateMovement(player: Player, dt: number)
 		end
 	end
 
-	-- Move head in direction
+	-- Move HRP in direction (anchored, so CFrame set is authoritative)
 	local dir = wormData.Direction
 	local move = dir * speed * dt
 	local newPos = hrp.Position + move
 	newPos = Vector3.new(newPos.X, 1, newPos.Z) -- Keep on ground
 
-	hrp.CFrame = CFrame.new(newPos, newPos + dir)
-	head.CFrame = CFrame.new(newPos, newPos + dir)
+	local newCFrame = CFrame.new(newPos, newPos + dir)
+	hrp.CFrame = newCFrame
+
+	-- Move visual worm head to match
+	local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+	if wormHead then
+		wormHead.CFrame = newCFrame
+	end
 end
 
 function WormService:_gameStep(dt: number)
@@ -467,15 +471,15 @@ function WormService:_gameStep(dt: number)
 			continue
 		end
 
-		local head = character:FindFirstChild("Head") :: BasePart?
-		if not head then
+		local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if not hrp then
 			continue
 		end
 
 		self:_updateMovement(player, dt)
 		self:_updateSegments(player)
 
-		local headPos = head.Position
+		local headPos = hrp.Position
 		self:_checkFoodCollection(player, headPos)
 		self:_checkWormCollisions(player, headPos)
 		self:_checkBounds(player, headPos)

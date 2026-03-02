@@ -47,12 +47,12 @@ function WormController:_updateCamera()
 		return
 	end
 
-	local head = character:FindFirstChild("Head") :: BasePart?
-	if not head then
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
 		return
 	end
 
-	local pos = head.Position
+	local pos = hrp.Position
 	local angleRad = math.rad(CAMERA_ANGLE)
 	local offset = Vector3.new(0, CAMERA_HEIGHT * math.sin(angleRad), CAMERA_HEIGHT * math.cos(angleRad) * 0.3)
 	Camera.CFrame = CFrame.new(pos + offset, pos)
@@ -94,12 +94,12 @@ function WormController:_getWorldDirection(): Vector3?
 		return nil
 	end
 
-	local head = character:FindFirstChild("Head") :: BasePart?
-	if not head then
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
 		return nil
 	end
 
-	local dir = (hitPoint - head.Position) * Vector3.new(1, 0, 1)
+	local dir = (hitPoint - hrp.Position) * Vector3.new(1, 0, 1)
 	if dir.Magnitude < 0.1 then
 		return nil
 	end
@@ -233,6 +233,17 @@ function WormController:KnitStart()
 
 	self:_setupInput()
 	self:_connectServerSignals()
+
+	-- Catch up: server may have spawned our worm before client connected signals
+	local ok, data = pcall(function()
+		return self._wormService:GetWormData()
+	end)
+	if ok and data and data.State == "Alive" then
+		self._alive = true
+		self._segments = data.Segments
+		self:_setupCamera()
+		self.WormSpawned:Fire(data)
+	end
 
 	self._trove:Add(RunService.RenderStepped:Connect(function()
 		self:_onRenderStep()
