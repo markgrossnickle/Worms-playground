@@ -193,16 +193,28 @@ function WormService:_setupCharacter(player: Player, character: Model)
 		end
 	end
 
+	-- Hide any parts that load late (accessories, layered clothing, etc.)
+	character.DescendantAdded:Connect(function(desc)
+		if desc:IsA("BasePart") and desc.Name ~= "WormHead" and not string.match(desc.Name, "^Segment") then
+			desc.Transparency = 1
+			desc.CanCollide = false
+		elseif desc:IsA("Decal") then
+			desc.Transparency = 1
+		end
+	end)
+
 	local wormData = self._worms[player]
 	local color = if wormData then wormData.Color else Color3.new(1, 1, 1)
 
 	-- Create visual worm head as a new ball Part (avoids R15 MeshPart Shape crash)
+	local headSize = WormConfig.SegmentSize + 0.5
 	local wormHead = Instance.new("Part")
 	wormHead.Name = "WormHead"
 	wormHead.Shape = Enum.PartType.Ball
-	wormHead.Size = Vector3.new(WormConfig.SegmentSize, WormConfig.SegmentSize, WormConfig.SegmentSize)
+	wormHead.Size = Vector3.new(headSize, headSize, headSize)
 	wormHead.Color = color
-	wormHead.Material = Enum.Material.SmoothPlastic
+	wormHead.Material = Enum.Material.Neon
+	wormHead.Transparency = 0
 	wormHead.Anchored = true
 	wormHead.CanCollide = false
 	wormHead.CFrame = hrp.CFrame
