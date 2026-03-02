@@ -511,19 +511,23 @@ function WormService:_updateMovement(player: Player, dt: number)
 	local speed = WormConfig.BaseSpeed
 	if wormData.Boosting and wormData.Segments > WormConfig.MinBoostSegments then
 		speed = WormConfig.BoostSpeed
+		local prevFloor = math.floor(wormData.Segments)
 		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
 		wormData.Segments = math.max(WormConfig.MinBoostSegments, wormData.Segments - segmentsToLose)
+		local newFloor = math.floor(wormData.Segments)
 
-		-- Remove excess segments
-		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-		if segFolder then
-			local targetCount = math.floor(wormData.Segments)
-			for _, seg in segFolder:GetChildren() do
-				local idx = tonumber(string.match(seg.Name, "%d+"))
-				if idx and idx > targetCount then
-					seg:Destroy()
+		-- Remove excess segments and notify client when a visible segment is lost
+		if newFloor < prevFloor then
+			local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+			if segFolder then
+				for _, seg in segFolder:GetChildren() do
+					local idx = tonumber(string.match(seg.Name, "%d+"))
+					if idx and idx > newFloor then
+						seg:Destroy()
+					end
 				end
 			end
+			self.Client.WormAte:Fire(player, newFloor)
 		end
 	end
 
