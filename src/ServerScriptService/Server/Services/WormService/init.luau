@@ -772,6 +772,13 @@ end
 --------------------------------------------------
 
 function WormService.Client:SetDirection(player: Player, dirX: number, dirZ: number)
+	if type(dirX) ~= "number" or type(dirZ) ~= "number" then
+		return
+	end
+	if dirX ~= dirX or dirZ ~= dirZ then
+		return -- NaN check
+	end
+
 	local wormData = self.Server._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
 		return
@@ -784,6 +791,10 @@ function WormService.Client:SetDirection(player: Player, dirX: number, dirZ: num
 end
 
 function WormService.Client:SetBoosting(player: Player, boosting: boolean)
+	if type(boosting) ~= "boolean" then
+		return
+	end
+
 	local wormData = self.Server._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
 		return
@@ -881,6 +892,10 @@ function WormService:KnitStart()
 		if wormData and wormData.State == "Alive" then
 			self:_dropFoodFromWorm(player, math.floor(wormData.Segments * 0.5))
 		end
+
+		-- Clear active power-ups for the leaving player
+		PowerUpService:ClearActivePowerUp(player.Name)
+
 		self._worms[player] = nil
 
 		local trove = self._troves[player]

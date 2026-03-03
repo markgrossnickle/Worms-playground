@@ -59,6 +59,9 @@ function ShrinkZoneService:_updateRingVisual()
 	local arcLength = 2 * radius * math.sin(segAngle / 2)
 
 	for i, part in self._ringParts do
+		if not part or not part.Parent then
+			continue
+		end
 		local angle = segAngle * (i - 1)
 		local x = math.cos(angle) * radius
 		local z = math.sin(angle) * radius
