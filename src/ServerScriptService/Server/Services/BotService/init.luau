@@ -630,10 +630,11 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 			end
 
 			if dist < WormConfig.CollisionRadius + 1 then
-				WormService:ConsumeFood(food)
-				botData.Segments += WormConfig.FoodValue
-				self:_createSegment(botData, math.floor(botData.Segments))
-				WormService:UpdateBotSegments(botData.Name, math.floor(botData.Segments))
+				if WormService:ConsumeFood(food) then
+					botData.Segments += WormConfig.FoodValue
+					self:_createSegment(botData, math.floor(botData.Segments))
+					WormService:UpdateBotSegments(botData.Name, math.floor(botData.Segments))
+				end
 			end
 		end
 	end

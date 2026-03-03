@@ -733,9 +733,8 @@ function WormUIController:KnitStart()
 		self:_addKillFeedEntry(deadName, killerName)
 	end))
 
-	-- Connect food signals (suppress Knit warning)
+	-- Connect food signal (suppress Knit warning)
 	self._trove:Add(self._wormService.FoodSpawned:Connect(function(_position: Vector3, _color: Color3) end))
-	self._trove:Add(self._wormService.FoodRemoved:Connect(function() end))
 
 	-- Periodic leaderboard + minimap + power-up timer updates
 	self._trove:Add(task.spawn(function()

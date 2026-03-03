@@ -9,6 +9,7 @@ local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local HALF_ARENA = WormConfig.ArenaSize / 2
 local RING_SEGMENTS = 64
 local RING_HEIGHT = 15
+local CLIENT_UPDATE_INTERVAL = 0.5 -- Send zone updates to clients at 2Hz
 
 local ShrinkZoneService = Knit.CreateService({
 	Name = "ShrinkZoneService",
@@ -21,9 +22,9 @@ local ShrinkZoneService = Knit.CreateService({
 	_currentRadius = HALF_ARENA,
 	_ringParts = {} :: { BasePart },
 	_ringFolder = nil :: Folder?,
-	_shrinking = false,
 	_warnedStart = false,
 	_warned30s = false,
+	_lastClientUpdate = 0,
 })
 
 --------------------------------------------------
@@ -61,7 +62,7 @@ function ShrinkZoneService:_updateRingVisual()
 		local angle = segAngle * (i - 1)
 		local x = math.cos(angle) * radius
 		local z = math.sin(angle) * radius
-		part.Size = Vector3.new(arcLength + 0.5, RING_HEIGHT, 1)
+		part.Size = Vector3.new(math.max(arcLength + 0.5, 0.5), RING_HEIGHT, 1)
 		part.CFrame = CFrame.new(Vector3.new(x, RING_HEIGHT / 2, z)) * CFrame.Angles(0, -angle + math.pi / 2, 0)
 	end
 end
@@ -85,6 +86,7 @@ end
 
 function ShrinkZoneService:_update()
 	local elapsed = self:GetElapsedTime()
+	local now = os.clock()
 
 	-- Warnings
 	if not self._warnedStart and elapsed >= WormConfig.ShrinkStartTime - 10 then
@@ -106,11 +108,15 @@ function ShrinkZoneService:_update()
 		-- Linear interpolation from full to zero
 		local t = (elapsed - WormConfig.ShrinkStartTime) / (WormConfig.ShrinkEndTime - WormConfig.ShrinkStartTime)
 		self._currentRadius = HALF_ARENA * (1 - t)
-		self._shrinking = true
 	end
 
 	self:_updateRingVisual()
-	self.Client.ZoneUpdate:FireAll(self._currentRadius, elapsed)
+
+	-- Throttle client updates to avoid network spam
+	if now - self._lastClientUpdate >= CLIENT_UPDATE_INTERVAL then
+		self._lastClientUpdate = now
+		self.Client.ZoneUpdate:FireAll(self._currentRadius, elapsed)
+	end
 end
 
 --------------------------------------------------

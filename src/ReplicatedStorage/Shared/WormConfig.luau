@@ -39,8 +39,6 @@ return {
 	-- Shrink zone (battle royale)
 	ShrinkStartTime = 60, -- seconds after game start before shrinking begins
 	ShrinkEndTime = 180, -- seconds after game start when zone fully closes
-	ShrinkDamageInterval = 0.5, -- how often to check/kill outside zone
-
 	-- Teams
 	TeamModeEnabled = false,
 	TeamSize = 2,

@@ -42,8 +42,6 @@ local WormService = Knit.CreateService({
 		WormDied = Knit.CreateSignal(),
 		WormAte = Knit.CreateSignal(),
 		FoodSpawned = Knit.CreateSignal(),
-		FoodRemoved = Knit.CreateSignal(),
-		StateSync = Knit.CreateSignal(),
 	},
 
 	_worms = {} :: { [Player]: WormData },
@@ -457,6 +455,11 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 			end
 
 			if dist < WormConfig.CollisionRadius + 1 then
+				-- Guard against double-consumption
+				if food:GetAttribute("Consumed") then
+					continue
+				end
+				food:SetAttribute("Consumed", true)
 				food:Destroy()
 				self._foodCount -= 1
 				wormData.Segments += WormConfig.FoodValue
@@ -707,9 +710,15 @@ function WormService:UpdateBotSegments(name: string, segments: number)
 	end
 end
 
-function WormService:ConsumeFood(food: BasePart)
+function WormService:ConsumeFood(food: BasePart): boolean
+	-- Guard against double-consumption in the same frame
+	if food:GetAttribute("Consumed") then
+		return false
+	end
+	food:SetAttribute("Consumed", true)
 	food:Destroy()
 	self._foodCount -= 1
+	return true
 end
 
 function WormService:DropFoodAtPosition(position: Vector3, count: number)
