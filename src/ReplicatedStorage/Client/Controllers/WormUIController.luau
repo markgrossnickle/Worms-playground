@@ -537,9 +537,9 @@ function WormUIController:_updateMinimap()
 		return
 	end
 
-	-- Clear old dots (keep ShrinkCircle and UICorner/UIStroke)
+	-- Clear old dots and arrows (keep ShrinkCircle and UICorner/UIStroke)
 	for _, child in minimap:GetChildren() do
-		if child:IsA("Frame") and child.Name == "Dot" then
+		if child.Name == "Dot" and (child:IsA("Frame") or child:IsA("TextLabel")) then
 			child:Destroy()
 		end
 	end
@@ -562,23 +562,37 @@ function WormUIController:_updateMinimap()
 		local nx = (pos.X + halfArena) / WormConfig.ArenaSize
 		local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
 
-		local dot = Instance.new("Frame")
-		dot.Name = "Dot"
-		dot.Size = UDim2.new(0, 6, 0, 6)
-		dot.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
-		dot.AnchorPoint = Vector2.new(0.5, 0.5)
-		dot.BorderSizePixel = 0
-		dot.Parent = minimap
-
-		local dotCorner = Instance.new("UICorner")
-		dotCorner.CornerRadius = UDim.new(1, 0)
-		dotCorner.Parent = dot
-
 		if player == LocalPlayer then
-			dot.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
-			dot.Size = UDim2.new(0, 8, 0, 8)
+			-- Triangle arrow showing heading direction
+			local dir = if self._wormController then self._wormController._direction else Vector3.new(0, 0, -1)
+			local angle = math.deg(math.atan2(dir.X, -dir.Z))
+
+			local arrow = Instance.new("TextLabel")
+			arrow.Name = "Dot"
+			arrow.Text = "\u{25B2}"
+			arrow.Size = UDim2.new(0, 14, 0, 14)
+			arrow.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
+			arrow.AnchorPoint = Vector2.new(0.5, 0.5)
+			arrow.BackgroundTransparency = 1
+			arrow.TextColor3 = Color3.fromRGB(100, 255, 100)
+			arrow.TextSize = 14
+			arrow.Font = Enum.Font.GothamBold
+			arrow.Rotation = angle
+			arrow.BorderSizePixel = 0
+			arrow.Parent = minimap
 		else
+			local dot = Instance.new("Frame")
+			dot.Name = "Dot"
+			dot.Size = UDim2.new(0, 6, 0, 6)
+			dot.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
+			dot.AnchorPoint = Vector2.new(0.5, 0.5)
+			dot.BorderSizePixel = 0
 			dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+			dot.Parent = minimap
+
+			local dotCorner = Instance.new("UICorner")
+			dotCorner.CornerRadius = UDim.new(1, 0)
+			dotCorner.Parent = dot
 		end
 	end
 

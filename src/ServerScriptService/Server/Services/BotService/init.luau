@@ -304,11 +304,8 @@ function BotService:_killBot(botName: string, killerName: string?)
 	-- Clear any active power-up
 	PowerUpService:ClearActivePowerUp(botName)
 
-	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if hrp then
-		local segmentsToDrop = math.floor(botData.Segments * 0.7)
-		WormService:DropFoodAtPosition(hrp.Position, segmentsToDrop)
-	end
+	local segmentsToDrop = math.floor(botData.Segments * 0.7)
+	WormService:DropFoodFromModel(botData.Model, segmentsToDrop)
 
 	WormService:FireBotDeath(botName, killerName)
 	WormService:UnregisterBot(botName)
@@ -630,10 +627,15 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 			end
 
 			if dist < WormConfig.CollisionRadius + 1 then
+				local foodValue = food:GetAttribute("FoodValue") or WormConfig.FoodValue
 				if WormService:ConsumeFood(food) then
-					botData.Segments += WormConfig.FoodValue
-					self:_createSegment(botData, math.floor(botData.Segments))
-					WormService:UpdateBotSegments(botData.Name, math.floor(botData.Segments))
+					local prevFloor = math.floor(botData.Segments)
+					botData.Segments += foodValue
+					local newFloor = math.floor(botData.Segments)
+					for i = prevFloor + 1, newFloor do
+						self:_createSegment(botData, i)
+					end
+					WormService:UpdateBotSegments(botData.Name, newFloor)
 				end
 			end
 		end

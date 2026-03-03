@@ -7,7 +7,7 @@ return {
 	-- Movement
 	BaseSpeed = 30,
 	BoostSpeed = 60,
-	BoostSegmentCostPerSec = 1,
+	BoostSegmentCostPerSec = 0.5,
 	MinBoostSegments = 5,
 
 	-- Segments
@@ -16,8 +16,13 @@ return {
 	InitialSegments = 3,
 
 	-- Food
-	MaxFoodOnMap = 500,
+	MaxFoodOnMap = 800,
 	FoodValue = 1,
+	FoodTiers = {
+		{ Weight = 60, Size = 1.2, Value = 1 },
+		{ Weight = 30, Size = 2.0, Value = 2 },
+		{ Weight = 10, Size = 3.0, Value = 4 },
+	},
 
 	-- Gameplay
 	RespawnDelay = 3,

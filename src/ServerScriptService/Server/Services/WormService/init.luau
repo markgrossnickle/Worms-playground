@@ -109,20 +109,39 @@ function WormService:_createArena()
 	end
 end
 
+local function pickFoodTier()
+	local tiers = WormConfig.FoodTiers
+	local totalWeight = 0
+	for _, tier in tiers do
+		totalWeight += tier.Weight
+	end
+	local roll = math.random() * totalWeight
+	local cumulative = 0
+	for _, tier in tiers do
+		cumulative += tier.Weight
+		if roll <= cumulative then
+			return tier
+		end
+	end
+	return tiers[#tiers]
+end
+
 function WormService:_spawnFood()
 	if self._foodCount >= WormConfig.MaxFoodOnMap then
 		return
 	end
 
+	local tier = pickFoodTier()
 	local food = Instance.new("Part")
 	food.Name = "Food"
 	food.Shape = Enum.PartType.Ball
-	food.Size = Vector3.new(1.5, 1.5, 1.5)
+	food.Size = Vector3.new(tier.Size, tier.Size, tier.Size)
 	food.Position = self:_randomArenaPosition()
 	food.Anchored = true
 	food.CanCollide = false
 	food.Material = Enum.Material.Neon
 	food.Color = Color3.fromHSV(math.random(), 0.9, 1)
+	food:SetAttribute("FoodValue", tier.Value)
 	food.Parent = self._foodFolder
 
 	self._foodCount += 1
@@ -135,31 +154,57 @@ function WormService:_spawnFoodBatch(count: number)
 	end
 end
 
+function WormService:_collectSegmentPositions(model: Model): { Vector3 }
+	local positions = {}
+	local wormHead = model:FindFirstChild("WormHead") :: BasePart?
+	if wormHead then
+		table.insert(positions, wormHead.Position)
+	end
+	local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+	if segFolder then
+		for _, seg in segFolder:GetChildren() do
+			if seg:IsA("BasePart") then
+				table.insert(positions, seg.Position)
+			end
+		end
+	end
+	return positions
+end
+
+function WormService:_dropFoodAtPositions(positions: { Vector3 }, count: number)
+	for i = 1, count do
+		local pos
+		if i <= #positions then
+			pos = positions[i] + Vector3.new(math.random(-3, 3), 0, math.random(-3, 3))
+		elseif #positions > 0 then
+			pos = positions[1] + Vector3.new(math.random(-20, 20), 0, math.random(-20, 20))
+		else
+			return
+		end
+		pos = Vector3.new(pos.X, 1, pos.Z)
+
+		local food = Instance.new("Part")
+		food.Name = "Food"
+		food.Shape = Enum.PartType.Ball
+		food.Size = Vector3.new(1.5, 1.5, 1.5)
+		food.Position = pos
+		food.Anchored = true
+		food.CanCollide = false
+		food.Material = Enum.Material.Neon
+		food.Color = Color3.fromHSV(math.random(), 0.9, 1)
+		food:SetAttribute("FoodValue", 1)
+		food.Parent = self._foodFolder
+		self._foodCount += 1
+	end
+end
+
 function WormService:_dropFoodFromWorm(player: Player, count: number)
 	local character = player.Character
 	if not character then
 		return
 	end
-	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return
-	end
-
-	local basePos = hrp.Position
-	for _ = 1, count do
-		local offset = Vector3.new(math.random(-20, 20), 0, math.random(-20, 20))
-		local food = Instance.new("Part")
-		food.Name = "Food"
-		food.Shape = Enum.PartType.Ball
-		food.Size = Vector3.new(1.5, 1.5, 1.5)
-		food.Position = basePos + offset
-		food.Anchored = true
-		food.CanCollide = false
-		food.Material = Enum.Material.Neon
-		food.Color = Color3.fromHSV(math.random(), 0.9, 1)
-		food.Parent = self._foodFolder
-		self._foodCount += 1
-	end
+	local positions = self:_collectSegmentPositions(character)
+	self:_dropFoodAtPositions(positions, count)
 end
 
 function WormService:_setupCharacter(player: Player, character: Model)
@@ -460,14 +505,19 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 					continue
 				end
 				food:SetAttribute("Consumed", true)
+				local foodValue = food:GetAttribute("FoodValue") or WormConfig.FoodValue
 				food:Destroy()
 				self._foodCount -= 1
-				wormData.Segments += WormConfig.FoodValue
+				local prevFloor = math.floor(wormData.Segments)
+				wormData.Segments += foodValue
+				local newFloor = math.floor(wormData.Segments)
 
-				-- Add new segment to character
+				-- Add new segment visuals for each whole segment gained
 				local character = player.Character
 				if character then
-					self:_createSegment(character, player, math.floor(wormData.Segments), wormData.Color)
+					for i = prevFloor + 1, newFloor do
+						self:_createSegment(character, player, i, wormData.Color)
+					end
 				end
 
 				self.Client.WormAte:Fire(player, wormData.Segments)
@@ -722,20 +772,12 @@ function WormService:ConsumeFood(food: BasePart): boolean
 end
 
 function WormService:DropFoodAtPosition(position: Vector3, count: number)
-	for _ = 1, count do
-		local offset = Vector3.new(math.random(-20, 20), 0, math.random(-20, 20))
-		local food = Instance.new("Part")
-		food.Name = "Food"
-		food.Shape = Enum.PartType.Ball
-		food.Size = Vector3.new(1.5, 1.5, 1.5)
-		food.Position = position + offset
-		food.Anchored = true
-		food.CanCollide = false
-		food.Material = Enum.Material.Neon
-		food.Color = Color3.fromHSV(math.random(), 0.9, 1)
-		food.Parent = self._foodFolder
-		self._foodCount += 1
-	end
+	self:_dropFoodAtPositions({ position }, count)
+end
+
+function WormService:DropFoodFromModel(model: Model, count: number)
+	local positions = self:_collectSegmentPositions(model)
+	self:_dropFoodAtPositions(positions, count)
 end
 
 function WormService:FireBotDeath(botName: string, killerName: string?)
