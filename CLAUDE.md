@@ -1,5 +1,7 @@
 # CLAUDE.md - Worms Playground
 
+See [GAME.md](GAME.md) for game mechanics, architecture, and design details.
+
 This is a MindTrust Roblox project. It uses the Knit framework for service-oriented architecture.
 
 ## Project Structure
