@@ -23,9 +23,16 @@ local WormController = Knit.CreateController({
 	SegmentsChanged = Signal.new(),
 	WormDied = Signal.new(),
 	WormSpawned = Signal.new(),
+	PowerUpActivated = Signal.new(),
+	PowerUpExpired = Signal.new(),
+	ZoneUpdate = Signal.new(),
+	ZoneWarning = Signal.new(),
 
 	_trove = nil :: any,
 	_wormService = nil :: any,
+	_powerUpService = nil :: any,
+	_shrinkZoneService = nil :: any,
+	_teamService = nil :: any,
 	_direction = Vector3.new(0, 0, -1),
 	_boosting = false,
 	_segments = WormConfig.InitialSegments,
@@ -199,6 +206,38 @@ function WormController:_connectServerSignals()
 		self._segments = newSegments
 		self.SegmentsChanged:Fire(newSegments)
 	end))
+
+	-- Power-up signals
+	self._trove:Add(
+		self._powerUpService.PowerUpActivated:Connect(function(ownerName: string, powerUpType: string, duration: number)
+			if ownerName == LocalPlayer.Name then
+				self.PowerUpActivated:Fire(powerUpType, duration)
+			end
+		end)
+	)
+
+	self._trove:Add(self._powerUpService.PowerUpExpired:Connect(function(ownerName: string, _powerUpType: string)
+		if ownerName == LocalPlayer.Name then
+			self.PowerUpExpired:Fire()
+		end
+	end))
+
+	-- Suppress Knit warnings for signals we don't directly use here
+	self._trove:Add(self._powerUpService.PowerUpSpawned:Connect(function() end))
+	self._trove:Add(self._powerUpService.PowerUpCollected:Connect(function() end))
+
+	-- Shrink zone signals
+	self._trove:Add(self._shrinkZoneService.ZoneUpdate:Connect(function(radius: number, elapsed: number)
+		self.ZoneUpdate:Fire(radius, elapsed)
+	end))
+
+	self._trove:Add(self._shrinkZoneService.ZoneWarning:Connect(function(message: string)
+		self.ZoneWarning:Fire(message)
+	end))
+
+	-- Team signals (suppress Knit warning)
+	self._trove:Add(self._teamService.TeamAssigned:Connect(function() end))
+	self._trove:Add(self._teamService.TeamsUpdated:Connect(function() end))
 end
 
 --------------------------------------------------
@@ -234,6 +273,9 @@ end
 
 function WormController:KnitStart()
 	self._wormService = Knit.GetService("WormService")
+	self._powerUpService = Knit.GetService("PowerUpService")
+	self._shrinkZoneService = Knit.GetService("ShrinkZoneService")
+	self._teamService = Knit.GetService("TeamService")
 
 	self:_setupInput()
 	self:_connectServerSignals()

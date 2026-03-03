@@ -24,6 +24,10 @@ type WormData = {
 	LastRecordedPos: Vector3,
 }
 
+local PowerUpService -- Set in KnitStart
+local ShrinkZoneService -- Set in KnitStart
+local TeamService -- Set in KnitStart
+
 local HALF_ARENA = WormConfig.ArenaSize / 2
 
 -- Position history: record a position every MIN_RECORD_DISTANCE studs.
@@ -364,6 +368,11 @@ function WormService:_spawnWorm(player: Player)
 
 	self:_setupCharacter(player, character)
 
+	-- Assign team if team mode is active
+	if TeamService:IsEnabled() then
+		TeamService:AssignToTeam(player.Name)
+	end
+
 	self.Client.WormSpawned:Fire(player, {
 		Segments = wormData.Segments,
 		Color = { wormData.Color.R, wormData.Color.G, wormData.Color.B },
@@ -376,6 +385,9 @@ function WormService:_killWorm(player: Player, killer: Player?, killerBotName: s
 	if not wormData or wormData.State ~= "Alive" then
 		return
 	end
+
+	-- Clear any active power-up
+	PowerUpService:ClearActivePowerUp(player.Name)
 
 	local segmentsToDrop = math.floor(wormData.Segments * 0.7)
 	self:_dropFoodFromWorm(player, segmentsToDrop)
@@ -429,10 +441,21 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 		return
 	end
 
+	-- Magnet power-up: pull nearby food toward head
+	local magnetRange = PowerUpService:GetMagnetRange(player.Name)
+
 	local foodFolder = self._foodFolder :: Folder
 	for _, food in foodFolder:GetChildren() do
 		if food:IsA("BasePart") then
-			local dist = (food.Position - headPos).Magnitude
+			local diff = food.Position - headPos
+			local dist = diff.Magnitude
+
+			-- Magnet: pull food toward head
+			if magnetRange > 0 and dist < magnetRange and dist > WormConfig.CollisionRadius + 1 then
+				local pullDir = -diff.Unit
+				food.Position = food.Position + pullDir * 2 -- pull 2 studs per frame
+			end
+
 			if dist < WormConfig.CollisionRadius + 1 then
 				food:Destroy()
 				self._foodCount -= 1
@@ -449,6 +472,9 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 			end
 		end
 	end
+
+	-- Check power-up collection
+	PowerUpService:CollectPowerUp(player.Name, headPos)
 end
 
 function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
@@ -457,9 +483,19 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 		return
 	end
 
+	-- Ghost power-up: skip all collision checks
+	if PowerUpService:IsGhost(player.Name) then
+		return
+	end
+
 	-- Check against other player segments
 	for otherPlayer, otherData in self._worms do
 		if otherPlayer == player or otherData.State ~= "Alive" then
+			continue
+		end
+
+		-- Team mode: skip teammate collisions
+		if TeamService:AreTeammates(player.Name, otherPlayer.Name) then
 			continue
 		end
 
@@ -477,6 +513,10 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 			if seg:IsA("BasePart") then
 				local segDist = (seg.Position - headPos).Magnitude
 				if segDist < WormConfig.CollisionRadius * 2 then
+					-- Shield power-up: consume shield instead of dying
+					if PowerUpService:ConsumeShield(player.Name) then
+						return
+					end
 					self:_killWorm(player, otherPlayer)
 					return
 				end
@@ -486,6 +526,11 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 
 	-- Check against bot segments
 	for botName, botInfo in self._botModels do
+		-- Team mode: skip teammate collisions
+		if TeamService:AreTeammates(player.Name, botName) then
+			continue
+		end
+
 		local segFolder = botInfo.Model:FindFirstChild("WormSegments") :: Folder?
 		if not segFolder then
 			continue
@@ -495,6 +540,9 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 			if seg:IsA("BasePart") then
 				local segDist = (seg.Position - headPos).Magnitude
 				if segDist < WormConfig.CollisionRadius * 2 then
+					if PowerUpService:ConsumeShield(player.Name) then
+						return
+					end
 					self:_killWorm(player, nil, botName)
 					return
 				end
@@ -504,7 +552,14 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 end
 
 function WormService:_checkBounds(player: Player, headPos: Vector3)
+	-- Static arena wall check
 	if math.abs(headPos.X) > HALF_ARENA or math.abs(headPos.Z) > HALF_ARENA then
+		self:_killWorm(player, nil)
+		return
+	end
+
+	-- Shrink zone check
+	if ShrinkZoneService:IsOutsideZone(headPos) then
 		self:_killWorm(player, nil)
 	end
 end
@@ -556,10 +611,10 @@ function WormService:_updateMovement(player: Player, dt: number)
 		return
 	end
 
-	-- Handle boosting
-	local speed = WormConfig.BaseSpeed
+	-- Handle boosting and power-up speed
+	local speed = WormConfig.BaseSpeed * PowerUpService:GetSpeedMultiplier(player.Name)
 	if wormData.Boosting and wormData.Segments > WormConfig.MinBoostSegments then
-		speed = WormConfig.BoostSpeed
+		speed = WormConfig.BoostSpeed * PowerUpService:GetSpeedMultiplier(player.Name)
 		local prevFloor = math.floor(wormData.Segments)
 		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
 		wormData.Segments = math.max(WormConfig.MinBoostSegments, wormData.Segments - segmentsToLose)
@@ -678,6 +733,31 @@ function WormService:FireBotDeath(botName: string, killerName: string?)
 	self.Client.WormDied:FireAll(botName, killerName)
 end
 
+-- Used by PowerUpService (SIZE_BOMB)
+function WormService:AddSegments(ownerName: string, count: number)
+	-- Check if it's a player
+	for player, wormData in self._worms do
+		if player.Name == ownerName and wormData.State == "Alive" then
+			wormData.Segments += count
+			local character = player.Character
+			if character then
+				for i = math.floor(wormData.Segments - count) + 1, math.floor(wormData.Segments) do
+					self:_createSegment(character, player, i, wormData.Color)
+				end
+			end
+			self.Client.WormAte:Fire(player, wormData.Segments)
+			self.PlayerScoreChanged:Fire(player, wormData.Segments)
+			return
+		end
+	end
+
+	-- Check if it's a bot
+	local botInfo = self._botModels[ownerName]
+	if botInfo then
+		botInfo.Segments += count
+	end
+end
+
 --------------------------------------------------
 -- Client methods
 --------------------------------------------------
@@ -758,6 +838,10 @@ local function newWormData(color: Color3): WormData
 end
 
 function WormService:KnitStart()
+	PowerUpService = require(script.Parent.PowerUpService)
+	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
+	TeamService = require(script.Parent.TeamService)
+
 	self:_createArena()
 	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)
 

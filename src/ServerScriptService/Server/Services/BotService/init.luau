@@ -8,13 +8,17 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 
 local WormService -- Set in KnitStart via require
+local PowerUpService -- Set in KnitStart via require
+local ShrinkZoneService -- Set in KnitStart via require
+local TeamService -- Set in KnitStart via require
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
 local MIN_RECORD_DISTANCE = 0.5
 local ENTRIES_PER_SEGMENT = math.ceil(WormConfig.SegmentSpacing / MIN_RECORD_DISTANCE)
 
-local TARGET_TOTAL_WORMS = 8
+local TARGET_TOTAL_WORMS = 16
 local FOOD_SEEK_RANGE = 30
+local POWERUP_SEEK_RANGE = 20
 local FLEE_RANGE = 20
 local CHASE_RANGE = 15
 local DIRECTION_CHANGE_MIN = 1
@@ -277,6 +281,11 @@ function BotService:_spawnBot()
 
 	self._bots[name] = botData
 	WormService:RegisterBot(name, model, botData.Segments)
+
+	-- Assign to team if team mode enabled
+	if TeamService:IsEnabled() then
+		TeamService:AssignToTeam(name)
+	end
 end
 
 function BotService:_killBot(botName: string, killerName: string?)
@@ -285,7 +294,15 @@ function BotService:_killBot(botName: string, killerName: string?)
 		return
 	end
 
+	-- Shield power-up: consume shield instead of dying
+	if PowerUpService:ConsumeShield(botName) then
+		return
+	end
+
 	botData.State = "Dead"
+
+	-- Clear any active power-up
+	PowerUpService:ClearActivePowerUp(botName)
 
 	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if hrp then
@@ -295,6 +312,12 @@ function BotService:_killBot(botName: string, killerName: string?)
 
 	WormService:FireBotDeath(botName, killerName)
 	WormService:UnregisterBot(botName)
+
+	-- Remove from team
+	if TeamService:IsEnabled() then
+		TeamService:RemoveFromTeam(botName)
+	end
+
 	botData.Model:Destroy()
 
 	self._usedNames[botName] = nil
@@ -338,6 +361,10 @@ function BotService:_findNearestWormThreat(botName: string, botPos: Vector3, bot
 		if wormData.State ~= "Alive" then
 			continue
 		end
+		-- Skip teammates
+		if TeamService:AreTeammates(botName, player.Name) then
+			continue
+		end
 		local char = player.Character
 		if not char then
 			continue
@@ -360,6 +387,10 @@ function BotService:_findNearestWormThreat(botName: string, botPos: Vector3, bot
 	-- Check other bots
 	for otherName, otherData in self._bots do
 		if otherName == botName or otherData.State ~= "Alive" then
+			continue
+		end
+		-- Skip teammates
+		if TeamService:AreTeammates(botName, otherName) then
 			continue
 		end
 		local otherHrp = otherData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
@@ -394,7 +425,26 @@ function BotService:_updateAI(botData: BotData, now: number)
 
 	local botPos = hrp.Position
 
-	-- Wall avoidance (highest priority)
+	-- Shrink zone avoidance (highest priority)
+	local zoneRadius = ShrinkZoneService:GetCurrentRadius()
+	local distFromCenter = Vector3.new(botPos.X, 0, botPos.Z).Magnitude
+	local zoneMargin = 50
+	if distFromCenter > zoneRadius - zoneMargin and zoneRadius < HALF_ARENA then
+		-- Move toward center
+		local toCenter = (Vector3.zero - Vector3.new(botPos.X, 0, botPos.Z))
+		if toCenter.Magnitude > 0.1 then
+			botData.Direction = toCenter.Unit
+			botData.NextDirectionChange = now + 0.5
+			-- Boost if getting close to edge
+			if distFromCenter > zoneRadius - 20 and botData.Segments > WormConfig.MinBoostSegments + 2 then
+				botData.Boosting = true
+				botData.BoostEndTime = now + 1
+			end
+			return
+		end
+	end
+
+	-- Wall avoidance
 	local margin = 50
 	local awayDir = Vector3.zero
 	if botPos.X > HALF_ARENA - margin then
@@ -430,6 +480,17 @@ function BotService:_updateAI(botData: BotData, now: number)
 			else
 				botData.Direction = diff.Unit
 			end
+			botData.NextDirectionChange = now + 0.3
+			return
+		end
+	end
+
+	-- Pursue nearby power-ups
+	local powerUpPos = PowerUpService:GetNearestPowerUp(botPos, POWERUP_SEEK_RANGE)
+	if powerUpPos then
+		local diff = (powerUpPos - botPos) * Vector3.new(1, 0, 1)
+		if diff.Magnitude > 0.1 then
+			botData.Direction = diff.Unit
 			botData.NextDirectionChange = now + 0.3
 			return
 		end
@@ -476,9 +537,10 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 		return
 	end
 
-	local speed = WormConfig.BaseSpeed
+	-- Apply speed power-up multiplier
+	local speed = WormConfig.BaseSpeed * PowerUpService:GetSpeedMultiplier(botData.Name)
 	if botData.Boosting and botData.Segments > WormConfig.MinBoostSegments then
-		speed = WormConfig.BoostSpeed
+		speed = WormConfig.BoostSpeed * PowerUpService:GetSpeedMultiplier(botData.Name)
 		local prevFloor = math.floor(botData.Segments)
 		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
 		botData.Segments = math.max(WormConfig.MinBoostSegments, botData.Segments - segmentsToLose)
@@ -544,6 +606,13 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 	end
 
 	local headPos = hrp.Position
+
+	-- Check power-up collection first
+	PowerUpService:CollectPowerUp(botData.Name, headPos)
+
+	-- Magnet power-up: pull food
+	local magnetRange = PowerUpService:GetMagnetRange(botData.Name)
+
 	local foodFolder = WormService._foodFolder :: Folder?
 	if not foodFolder then
 		return
@@ -551,7 +620,15 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 
 	for _, food in foodFolder:GetChildren() do
 		if food:IsA("BasePart") then
-			local dist = (food.Position - headPos).Magnitude
+			local diff = food.Position - headPos
+			local dist = diff.Magnitude
+
+			-- Magnet pull
+			if magnetRange > 0 and dist < magnetRange and dist > WormConfig.CollisionRadius + 1 then
+				local pullDir = -diff.Unit
+				food.Position = food.Position + pullDir * 2
+			end
+
 			if dist < WormConfig.CollisionRadius + 1 then
 				WormService:ConsumeFood(food)
 				botData.Segments += WormConfig.FoodValue
@@ -570,9 +647,18 @@ function BotService:_checkBotCollisions(botData: BotData)
 
 	local headPos = hrp.Position
 
+	-- Ghost power-up: skip collisions
+	if PowerUpService:IsGhost(botData.Name) then
+		return
+	end
+
 	-- Check against player segments
 	for player, wormData in WormService._worms do
 		if wormData.State ~= "Alive" then
+			continue
+		end
+		-- Skip teammates
+		if TeamService:AreTeammates(botData.Name, player.Name) then
 			continue
 		end
 		local char = player.Character
@@ -600,6 +686,10 @@ function BotService:_checkBotCollisions(botData: BotData)
 		if otherName == botData.Name or otherData.State ~= "Alive" then
 			continue
 		end
+		-- Skip teammates
+		if TeamService:AreTeammates(botData.Name, otherName) then
+			continue
+		end
 		local segFolder = otherData.Model:FindFirstChild("WormSegments") :: Folder?
 		if not segFolder then
 			continue
@@ -616,8 +706,14 @@ function BotService:_checkBotCollisions(botData: BotData)
 		end
 	end
 
-	-- Check bounds
+	-- Check static arena bounds
 	if math.abs(headPos.X) > HALF_ARENA or math.abs(headPos.Z) > HALF_ARENA then
+		self:_killBot(botData.Name, nil)
+		return
+	end
+
+	-- Check shrink zone bounds
+	if ShrinkZoneService:IsOutsideZone(headPos) then
 		self:_killBot(botData.Name, nil)
 	end
 end
@@ -630,6 +726,9 @@ function BotService:KnitInit() end
 
 function BotService:KnitStart()
 	WormService = require(script.Parent.WormService)
+	PowerUpService = require(script.Parent.PowerUpService)
+	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
+	TeamService = require(script.Parent.TeamService)
 
 	-- Spawn management loop
 	task.spawn(function()
