@@ -13,7 +13,8 @@ local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
-local CAMERA_HEIGHT = 60
+local CAMERA_BASE_HEIGHT = 40
+local CAMERA_HEIGHT_PER_SEGMENT = 0.5
 local CAMERA_ANGLE = 70 -- Degrees from horizontal
 
 local WormController = Knit.CreateController({
@@ -52,9 +53,12 @@ function WormController:_updateCamera()
 		return
 	end
 
+	-- Scale camera distance based on segment count so the full worm stays on screen
+	local cameraHeight = CAMERA_BASE_HEIGHT + (self._segments * CAMERA_HEIGHT_PER_SEGMENT)
+
 	local pos = hrp.Position
 	local angleRad = math.rad(CAMERA_ANGLE)
-	local offset = Vector3.new(0, CAMERA_HEIGHT * math.sin(angleRad), CAMERA_HEIGHT * math.cos(angleRad) * 0.3)
+	local offset = Vector3.new(0, cameraHeight * math.sin(angleRad), cameraHeight * math.cos(angleRad) * 0.3)
 	Camera.CFrame = CFrame.new(pos + offset, pos)
 end
 
