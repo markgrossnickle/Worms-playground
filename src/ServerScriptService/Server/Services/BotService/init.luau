@@ -108,18 +108,49 @@ function BotService:_createBotModel(name: string, color: Color3, spawnPos: Vecto
 	hrp.Parent = model
 	model.PrimaryPart = hrp
 
+	-- Bot head: classic Roblox head mesh with face decal and name label
 	local headSize = WormConfig.SegmentSize + 0.5
 	local wormHead = Instance.new("Part")
 	wormHead.Name = "WormHead"
-	wormHead.Shape = Enum.PartType.Ball
 	wormHead.Size = Vector3.new(headSize, headSize, headSize)
 	wormHead.Color = color
-	wormHead.Material = Enum.Material.Neon
+	wormHead.Material = Enum.Material.SmoothPlastic
 	wormHead.Transparency = 0
 	wormHead.Anchored = true
 	wormHead.CanCollide = false
 	wormHead.CFrame = CFrame.new(spawnPos)
+
+	local headMesh = Instance.new("SpecialMesh")
+	headMesh.MeshType = Enum.MeshType.Head
+	headMesh.Scale = Vector3.new(1.25, 1.25, 1.25)
+	headMesh.Parent = wormHead
+
+	local face = Instance.new("Decal")
+	face.Name = "face"
+	face.Texture = "rbxasset://textures/face.png"
+	face.Face = Enum.NormalId.Front
+	face.Parent = wormHead
+
 	wormHead.Parent = model
+
+	-- Name billboard above head so bots are distinguishable
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "NameLabel"
+	billboard.Size = UDim2.new(0, 120, 0, 30)
+	billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+	billboard.AlwaysOnTop = false
+	billboard.Parent = wormHead
+
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Size = UDim2.fromScale(1, 1)
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Text = name
+	nameLabel.TextColor3 = color
+	nameLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	nameLabel.TextStrokeTransparency = 0.3
+	nameLabel.Font = Enum.Font.GothamBold
+	nameLabel.TextScaled = true
+	nameLabel.Parent = billboard
 
 	local segFolder = Instance.new("Folder")
 	segFolder.Name = "WormSegments"

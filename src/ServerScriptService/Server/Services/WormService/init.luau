@@ -184,42 +184,70 @@ function WormService:_setupCharacter(player: Player, character: Model)
 	-- Anchor HRP so server CFrame sets are authoritative (no physics fighting)
 	hrp.Anchored = true
 
-	-- Hide all character parts, accessories, and decals
+	-- Find the actual avatar Head before hiding parts
+	local head = character:FindFirstChild("Head") :: BasePart?
+
+	-- Hide all character parts EXCEPT the Head (which becomes the worm head)
+	-- Keep face decals on the Head visible
 	for _, desc in character:GetDescendants() do
 		if desc:IsA("BasePart") then
-			desc.Transparency = 1
-			desc.CanCollide = false
+			if desc ~= head then
+				desc.Transparency = 1
+				desc.CanCollide = false
+			end
 		elseif desc:IsA("Decal") then
-			desc.Transparency = 1
+			if desc.Parent ~= head then
+				desc.Transparency = 1
+			end
 		end
 	end
 
 	-- Hide any parts that load late (accessories, layered clothing, etc.)
 	character.DescendantAdded:Connect(function(desc)
+		local wormHead = character:FindFirstChild("WormHead")
 		if desc:IsA("BasePart") and desc.Name ~= "WormHead" and not string.match(desc.Name, "^Segment") then
 			desc.Transparency = 1
 			desc.CanCollide = false
 		elseif desc:IsA("Decal") then
-			desc.Transparency = 1
+			if desc.Parent ~= wormHead then
+				desc.Transparency = 1
+			end
 		end
 	end)
 
 	local wormData = self._worms[player]
 	local color = if wormData then wormData.Color else Color3.new(1, 1, 1)
 
-	-- Create visual worm head as a new ball Part (avoids R15 MeshPart Shape crash)
+	-- Use the avatar Head as the worm head: break rig, anchor, rename
 	local headSize = WormConfig.SegmentSize + 0.5
-	local wormHead = Instance.new("Part")
-	wormHead.Name = "WormHead"
-	wormHead.Shape = Enum.PartType.Ball
-	wormHead.Size = Vector3.new(headSize, headSize, headSize)
-	wormHead.Color = color
-	wormHead.Material = Enum.Material.Neon
-	wormHead.Transparency = 0
-	wormHead.Anchored = true
-	wormHead.CanCollide = false
-	wormHead.CFrame = hrp.CFrame
-	wormHead.Parent = character
+	if head then
+		-- Destroy all Motor6Ds that connect to the Head (Neck joint, etc.)
+		for _, desc in character:GetDescendants() do
+			if desc:IsA("Motor6D") and (desc.Part0 == head or desc.Part1 == head) then
+				desc:Destroy()
+			end
+		end
+
+		head.Anchored = true
+		head.CanCollide = false
+		head.Transparency = 0
+		head.Size = Vector3.new(headSize, headSize, headSize)
+		head.CFrame = hrp.CFrame
+		head.Name = "WormHead" -- Rename so all existing FindFirstChild("WormHead") code works
+	else
+		-- Fallback: create a ball if Head somehow doesn't exist
+		local wormHead = Instance.new("Part")
+		wormHead.Name = "WormHead"
+		wormHead.Shape = Enum.PartType.Ball
+		wormHead.Size = Vector3.new(headSize, headSize, headSize)
+		wormHead.Color = color
+		wormHead.Material = Enum.Material.Neon
+		wormHead.Transparency = 0
+		wormHead.Anchored = true
+		wormHead.CanCollide = false
+		wormHead.CFrame = hrp.CFrame
+		wormHead.Parent = character
+	end
 
 	-- Create body segments folder under character
 	local segFolder = Instance.new("Folder")
