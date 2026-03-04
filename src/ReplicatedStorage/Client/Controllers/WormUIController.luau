@@ -50,6 +50,7 @@ local WormUIController = Knit.CreateController({
 
 	-- Ghost mode toggle
 	_ghostToggleBtn = nil :: TextButton?,
+	_crosshairFrame = nil :: Frame?,
 
 	-- Round UI elements
 	_statsLabel = nil :: TextLabel?,
@@ -127,6 +128,7 @@ function WormUIController:_buildUI()
 	self:_buildFinalScoreboard(gui)
 	self:_buildCountdownOverlay(gui)
 	self:_buildCoinDisplay(gui)
+	self:_buildCrosshair(gui)
 end
 
 function WormUIController:_buildSegmentCounter(parent: ScreenGui)
@@ -650,6 +652,53 @@ function WormUIController:_buildCoinDisplay(parent: ScreenGui)
 	})
 end
 
+function WormUIController:_buildCrosshair(parent: ScreenGui)
+	local frame = Instance.new("Frame")
+	frame.Name = "Crosshair"
+	frame.Size = UDim2.new(0, 24, 0, 24)
+	frame.Position = UDim2.fromScale(0.5, 0.5)
+	frame.AnchorPoint = Vector2.new(0.5, 0.5)
+	frame.BackgroundTransparency = 1
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.Parent = parent
+	self._crosshairFrame = frame
+
+	-- Horizontal line
+	local hLine = Instance.new("Frame")
+	hLine.Name = "H"
+	hLine.Size = UDim2.new(1, 0, 0, 2)
+	hLine.Position = UDim2.fromScale(0, 0.5)
+	hLine.AnchorPoint = Vector2.new(0, 0.5)
+	hLine.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+	hLine.BorderSizePixel = 0
+	hLine.Parent = frame
+
+	-- Vertical line
+	local vLine = Instance.new("Frame")
+	vLine.Name = "V"
+	vLine.Size = UDim2.new(0, 2, 1, 0)
+	vLine.Position = UDim2.fromScale(0.5, 0)
+	vLine.AnchorPoint = Vector2.new(0.5, 0)
+	vLine.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
+	vLine.BorderSizePixel = 0
+	vLine.Parent = frame
+
+	-- Center dot
+	local dot = Instance.new("Frame")
+	dot.Name = "Dot"
+	dot.Size = UDim2.new(0, 4, 0, 4)
+	dot.Position = UDim2.fromScale(0.5, 0.5)
+	dot.AnchorPoint = Vector2.new(0.5, 0.5)
+	dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	dot.BorderSizePixel = 0
+	dot.Parent = frame
+
+	local dotCorner = Instance.new("UICorner")
+	dotCorner.CornerRadius = UDim.new(1, 0)
+	dotCorner.Parent = dot
+end
+
 function WormUIController:_buildCountdownOverlay(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "CountdownOverlay"
@@ -1127,7 +1176,7 @@ function WormUIController:KnitStart()
 		end)
 	end
 
-	-- Ghost mode changed signal — toggle death screen visibility and button text
+	-- Ghost mode changed signal — toggle death screen visibility, button text, and crosshair
 	self._trove:Add(self._wormController.GhostModeChanged:Connect(function(inGhost: boolean)
 		if inGhost then
 			-- Hide death overlay while in ghost mode (player is in first person)
@@ -1142,6 +1191,9 @@ function WormUIController:KnitStart()
 		end
 		if self._ghostToggleBtn then
 			self._ghostToggleBtn.Text = if inGhost then "Exit Ghost Mode" else "Enter Ghost Mode"
+		end
+		if self._crosshairFrame then
+			self._crosshairFrame.Visible = inGhost
 		end
 	end))
 

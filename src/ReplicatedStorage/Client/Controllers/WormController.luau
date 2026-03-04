@@ -60,7 +60,27 @@ local WormController = Knit.CreateController({
 	-- Ghost mode state
 	_inGhostMode = false,
 	GhostModeChanged = Signal.new(),
+
+	-- Grapple state
+	_grappleState = "IDLE" :: string, -- IDLE | TARGETING | PULLING | RIDING
+	_grappleTarget = nil :: BasePart?,
+	_grappleTargetName = nil :: string?,
+	_grappleBeam = nil :: Beam?,
+	_grappleAttachment0 = nil :: Attachment?,
+	_grappleAttachment1 = nil :: Attachment?,
+	_grappleHighlight = nil :: Highlight?,
+	_grapplePullStart = 0,
+	_grapplePullDuration = 0.3,
+	_grapplePullStartPos = nil :: Vector3?,
+	_rideWeld = nil :: WeldConstraint?,
 })
+
+--------------------------------------------------
+-- Grapple constants
+--------------------------------------------------
+
+local GRAPPLE_RANGE = 30
+local GRAPPLE_PULL_DURATION = 0.3
 
 --------------------------------------------------
 -- Camera
@@ -263,9 +283,9 @@ end
 function WormController:_setupInput()
 	self._isTouchDevice = UserInputService.TouchEnabled
 
-	-- Keyboard/mouse boost: hold Shift or left mouse button
+	-- Keyboard/mouse boost: hold Shift or left mouse button (skip in ghost mode)
 	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
-		if processed then
+		if processed or self._inGhostMode then
 			return
 		end
 
@@ -316,7 +336,9 @@ function WormController:_onRenderStep()
 		end
 
 		self:_updateCamera()
-	elseif not self._inGhostMode and self._spectateTargetModel then
+	elseif self._inGhostMode then
+		self:_updateGhostGrapple()
+	elseif self._spectateTargetModel then
 		self:_updateSpectateCamera()
 	end
 end
@@ -552,6 +574,11 @@ function WormController:_enterGhostMode()
 end
 
 function WormController:_exitGhostMode()
+	-- Detach grapple if riding
+	if self._grappleState ~= "IDLE" then
+		self:_detachGrapple()
+	end
+
 	self._inGhostMode = false
 
 	-- Restore camera
@@ -559,6 +586,305 @@ function WormController:_exitGhostMode()
 	Camera.CameraType = Enum.CameraType.Scriptable
 
 	self.GhostModeChanged:Fire(false)
+end
+
+--------------------------------------------------
+-- Grapple mechanic (ghost mode only)
+--------------------------------------------------
+
+function WormController:_findWormUnderCursor(): (BasePart?, Model?)
+	local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+	local ray = Camera:ViewportPointToRay(screenCenter.X, screenCenter.Y)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Include
+
+	-- Build filter list of all worm head parts
+	local filterList = {}
+	for _, child in workspace:GetChildren() do
+		if child:IsA("Model") and child:FindFirstChild("WormHead") then
+			table.insert(filterList, child)
+		end
+	end
+	for _, player in Players:GetPlayers() do
+		if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("WormHead") then
+			table.insert(filterList, player.Character)
+		end
+	end
+	rayParams.FilterDescendantsInstances = filterList
+
+	local result = workspace:Raycast(ray.Origin, ray.Direction * GRAPPLE_RANGE, rayParams)
+	if result and result.Instance then
+		local model = result.Instance:FindFirstAncestorOfClass("Model")
+		if model and model:FindFirstChild("WormHead") then
+			return model:FindFirstChild("WormHead") :: BasePart, model
+		end
+	end
+	return nil, nil
+end
+
+function WormController:_updateGrappleHighlight(wormHead: BasePart?, wormModel: Model?)
+	-- Remove old highlight if target changed
+	if self._grappleHighlight then
+		if not wormModel or self._grappleHighlight.Parent ~= wormModel then
+			self._grappleHighlight:Destroy()
+			self._grappleHighlight = nil
+		end
+	end
+
+	if not wormModel or not wormHead then
+		return
+	end
+
+	-- Create highlight if needed
+	if not self._grappleHighlight then
+		local highlight = Instance.new("Highlight")
+		highlight.Name = "GrappleHighlight"
+		highlight.FillColor = Color3.fromRGB(100, 200, 255)
+		highlight.FillTransparency = 0.7
+		highlight.OutlineColor = Color3.fromRGB(0, 180, 255)
+		highlight.OutlineTransparency = 0
+		highlight.Parent = wormModel
+		self._grappleHighlight = highlight
+	end
+end
+
+function WormController:_createBeam(fromPart: BasePart, toPart: BasePart)
+	-- Clean up old beam
+	self:_cleanupBeam()
+
+	local att0 = Instance.new("Attachment")
+	att0.Name = "GrappleAtt0"
+	att0.Parent = fromPart
+	self._grappleAttachment0 = att0
+
+	local att1 = Instance.new("Attachment")
+	att1.Name = "GrappleAtt1"
+	att1.Parent = toPart
+	self._grappleAttachment1 = att1
+
+	local beam = Instance.new("Beam")
+	beam.Name = "GrappleBeam"
+	beam.Attachment0 = att0
+	beam.Attachment1 = att1
+	beam.Color = ColorSequence.new(Color3.fromRGB(0, 180, 255))
+	beam.Width0 = 0.3
+	beam.Width1 = 0.3
+	beam.FaceCamera = true
+	beam.LightEmission = 0.8
+	beam.Transparency = NumberSequence.new(0.2)
+	beam.Parent = fromPart
+	self._grappleBeam = beam
+end
+
+function WormController:_cleanupBeam()
+	if self._grappleBeam then
+		self._grappleBeam:Destroy()
+		self._grappleBeam = nil
+	end
+	if self._grappleAttachment0 then
+		self._grappleAttachment0:Destroy()
+		self._grappleAttachment0 = nil
+	end
+	if self._grappleAttachment1 then
+		self._grappleAttachment1:Destroy()
+		self._grappleAttachment1 = nil
+	end
+end
+
+function WormController:_startGrapplePull(targetHead: BasePart, targetModel: Model)
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	self._grappleState = "PULLING"
+	self._grappleTarget = targetHead
+	self._grappleTargetName = targetModel.Name
+	self._grapplePullStart = os.clock()
+	self._grapplePullDuration = GRAPPLE_PULL_DURATION
+	self._grapplePullStartPos = hrp.Position
+
+	-- Create beam from ghost to worm head
+	self:_createBeam(hrp, targetHead)
+end
+
+function WormController:_updateGrapplePull()
+	local character = LocalPlayer.Character
+	if not character then
+		self:_detachGrapple()
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		self:_detachGrapple()
+		return
+	end
+	local targetHead = self._grappleTarget
+	if not targetHead or not targetHead.Parent then
+		self:_detachGrapple()
+		return
+	end
+
+	local elapsed = os.clock() - self._grapplePullStart
+	local alpha = math.clamp(elapsed / self._grapplePullDuration, 0, 1)
+
+	local startPos = self._grapplePullStartPos :: Vector3
+	local targetPos = targetHead.Position + Vector3.new(0, 2, 0) -- sit on top
+
+	hrp.CFrame = CFrame.new(startPos:Lerp(targetPos, alpha))
+
+	if alpha >= 1 then
+		self:_attachToWorm()
+	end
+end
+
+function WormController:_attachToWorm()
+	local character = LocalPlayer.Character
+	if not character then
+		self:_detachGrapple()
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		self:_detachGrapple()
+		return
+	end
+	local targetHead = self._grappleTarget
+	if not targetHead or not targetHead.Parent then
+		self:_detachGrapple()
+		return
+	end
+
+	-- Position ghost on top of worm head
+	hrp.CFrame = targetHead.CFrame * CFrame.new(0, 2, 0)
+
+	-- Weld ghost to worm head
+	local weld = Instance.new("WeldConstraint")
+	weld.Name = "GrappleWeld"
+	weld.Part0 = hrp
+	weld.Part1 = targetHead
+	weld.Parent = hrp
+	self._rideWeld = weld
+
+	-- Remove beam now that we're attached
+	self:_cleanupBeam()
+
+	self._grappleState = "RIDING"
+
+	-- Disable humanoid movement so ghost doesn't walk off
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.PlatformStand = true
+	end
+end
+
+function WormController:_detachGrapple()
+	local character = LocalPlayer.Character
+
+	-- Clean weld
+	if self._rideWeld then
+		self._rideWeld:Destroy()
+		self._rideWeld = nil
+	end
+
+	-- Clean beam
+	self:_cleanupBeam()
+
+	-- Clean highlight
+	if self._grappleHighlight then
+		self._grappleHighlight:Destroy()
+		self._grappleHighlight = nil
+	end
+
+	-- Re-enable humanoid movement
+	if character then
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.PlatformStand = false
+		end
+	end
+
+	self._grappleState = "IDLE"
+	self._grappleTarget = nil
+	self._grappleTargetName = nil
+	self._grapplePullStartPos = nil
+end
+
+function WormController:_onGhostClick()
+	if not self._inGhostMode then
+		return
+	end
+
+	if self._grappleState == "RIDING" then
+		-- Detach
+		self:_detachGrapple()
+		return
+	end
+
+	if self._grappleState == "PULLING" then
+		return -- Already pulling, ignore
+	end
+
+	-- Try to grapple a worm
+	local wormHead, wormModel = self:_findWormUnderCursor()
+	if wormHead and wormModel then
+		self:_startGrapplePull(wormHead, wormModel)
+	end
+end
+
+function WormController:_onGhostSpace()
+	if not self._inGhostMode then
+		return
+	end
+	if self._grappleState == "RIDING" then
+		self:_detachGrapple()
+	end
+end
+
+function WormController:_updateGhostGrapple()
+	if not self._inGhostMode then
+		return
+	end
+
+	if self._grappleState == "PULLING" then
+		self:_updateGrapplePull()
+		return
+	end
+
+	if self._grappleState == "RIDING" then
+		-- Check if target worm still exists
+		local targetHead = self._grappleTarget
+		if not targetHead or not targetHead.Parent then
+			self:_detachGrapple()
+		end
+		return
+	end
+
+	-- IDLE state: update targeting highlight
+	local wormHead, wormModel = self:_findWormUnderCursor()
+	self:_updateGrappleHighlight(wormHead, wormModel)
+end
+
+function WormController:_setupGhostInput()
+	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
+		if processed then
+			return
+		end
+		if not self._inGhostMode then
+			return
+		end
+
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			self:_onGhostClick()
+		elseif input.KeyCode == Enum.KeyCode.Space then
+			self:_onGhostSpace()
+		end
+	end)
 end
 
 function WormController:_removeSpeedBurstTrail()
@@ -623,6 +949,7 @@ function WormController:KnitStart()
 	self._teamService = Knit.GetService("TeamService")
 
 	self:_setupInput()
+	self:_setupGhostInput()
 	self:_connectServerSignals()
 
 	-- Catch up: server may have spawned our worm before client connected signals
