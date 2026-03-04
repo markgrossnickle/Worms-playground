@@ -484,8 +484,10 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 		return
 	end
 
-	-- Magnet power-up: pull nearby food toward head
-	local magnetRange = PowerUpService:GetMagnetRange(player.Name)
+	-- Food magnet: passive pull + power-up pull
+	local powerUpMagnetRange = PowerUpService:GetMagnetRange(player.Name)
+	local effectiveRange = math.max(WormConfig.PassiveMagnetRange, powerUpMagnetRange)
+	local pullSpeed = if powerUpMagnetRange > 0 then WormConfig.PowerUpMagnetPull else WormConfig.PassiveMagnetPull
 
 	local foodFolder = self._foodFolder :: Folder
 	for _, food in foodFolder:GetChildren() do
@@ -493,10 +495,10 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 			local diff = food.Position - headPos
 			local dist = diff.Magnitude
 
-			-- Magnet: pull food toward head
-			if magnetRange > 0 and dist < magnetRange and dist > WormConfig.CollisionRadius + 1 then
+			-- Pull nearby food toward head
+			if effectiveRange > 0 and dist < effectiveRange and dist > WormConfig.CollisionRadius + 1 then
 				local pullDir = -diff.Unit
-				food.Position = food.Position + pullDir * 2 -- pull 2 studs per frame
+				food.Position = food.Position + pullDir * pullSpeed
 			end
 
 			if dist < WormConfig.CollisionRadius + 1 then

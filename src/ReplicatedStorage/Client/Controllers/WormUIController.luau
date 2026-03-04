@@ -447,7 +447,7 @@ function WormUIController:_addKillFeedEntry(deadName: string, killerName: string
 		return
 	end
 
-	local text = if killerName then killerName .. " ate " .. deadName else deadName .. " hit the wall"
+	local text = if killerName then deadName .. " ran into " .. killerName else deadName .. " hit the wall"
 
 	local entry = createTextLabel({
 		Name = "Entry",
@@ -570,12 +570,12 @@ function WormUIController:_updateMinimap()
 			local arrow = Instance.new("TextLabel")
 			arrow.Name = "Dot"
 			arrow.Text = "\u{25B2}"
-			arrow.Size = UDim2.new(0, 14, 0, 14)
+			arrow.Size = UDim2.new(0, 22, 0, 22)
 			arrow.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
 			arrow.AnchorPoint = Vector2.new(0.5, 0.5)
 			arrow.BackgroundTransparency = 1
 			arrow.TextColor3 = Color3.fromRGB(100, 255, 100)
-			arrow.TextSize = 14
+			arrow.TextSize = 22
 			arrow.Font = Enum.Font.GothamBold
 			arrow.Rotation = angle
 			arrow.BorderSizePixel = 0

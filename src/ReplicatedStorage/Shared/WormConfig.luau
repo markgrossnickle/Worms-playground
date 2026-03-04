@@ -24,6 +24,11 @@ return {
 		{ Weight = 10, Size = 3.0, Value = 4 },
 	},
 
+	-- Food magnet
+	PassiveMagnetRange = 8,
+	PassiveMagnetPull = 1,
+	PowerUpMagnetPull = 3,
+
 	-- Gameplay
 	RespawnDelay = 3,
 	CollisionRadius = 2,
@@ -35,7 +40,7 @@ return {
 	PowerUpDespawnTime = 20,
 	PowerUpTypes = {
 		SPEED = { Duration = 3, SpeedMultiplier = 2 },
-		MAGNET = { Duration = 5, Range = 15 },
+		MAGNET = { Duration = 10, Range = 25 },
 		GHOST = { Duration = 3 },
 		SHIELD = { Duration = 0 }, -- one-time save, no duration
 		SIZE_BOMB = { Duration = 0, SegmentsAdded = 5 }, -- instant effect

@@ -607,8 +607,10 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 	-- Check power-up collection first
 	PowerUpService:CollectPowerUp(botData.Name, headPos)
 
-	-- Magnet power-up: pull food
-	local magnetRange = PowerUpService:GetMagnetRange(botData.Name)
+	-- Food magnet: passive pull + power-up pull
+	local powerUpMagnetRange = PowerUpService:GetMagnetRange(botData.Name)
+	local effectiveRange = math.max(WormConfig.PassiveMagnetRange, powerUpMagnetRange)
+	local pullSpeed = if powerUpMagnetRange > 0 then WormConfig.PowerUpMagnetPull else WormConfig.PassiveMagnetPull
 
 	local foodFolder = WormService._foodFolder :: Folder?
 	if not foodFolder then
@@ -620,10 +622,10 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 			local diff = food.Position - headPos
 			local dist = diff.Magnitude
 
-			-- Magnet pull
-			if magnetRange > 0 and dist < magnetRange and dist > WormConfig.CollisionRadius + 1 then
+			-- Pull nearby food toward head
+			if effectiveRange > 0 and dist < effectiveRange and dist > WormConfig.CollisionRadius + 1 then
 				local pullDir = -diff.Unit
-				food.Position = food.Position + pullDir * 2
+				food.Position = food.Position + pullDir * pullSpeed
 			end
 
 			if dist < WormConfig.CollisionRadius + 1 then
