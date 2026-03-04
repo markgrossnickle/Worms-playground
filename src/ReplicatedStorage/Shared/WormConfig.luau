@@ -32,6 +32,7 @@ return {
 	-- Gameplay
 	RespawnDelay = 3,
 	CollisionRadius = 2,
+	SpeedScaleFactor = 0.02,
 
 	-- Power-ups
 	PowerUpSpawnIntervalMin = 10,
@@ -49,6 +50,7 @@ return {
 	-- Shrink zone (battle royale)
 	ShrinkStartTime = 60, -- seconds after game start before shrinking begins
 	ShrinkEndTime = 180, -- seconds after game start when zone fully closes
+	ShrinkMinRadius = 40, -- zone stops shrinking at this radius
 	-- Teams
 	TeamModeEnabled = false,
 	TeamSize = 2,

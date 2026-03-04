@@ -103,14 +103,15 @@ function ShrinkZoneService:_update()
 	end
 
 	-- Calculate radius
+	local minRadius = WormConfig.ShrinkMinRadius
 	if elapsed < WormConfig.ShrinkStartTime then
 		self._currentRadius = HALF_ARENA
 	elseif elapsed >= WormConfig.ShrinkEndTime then
-		self._currentRadius = 0
+		self._currentRadius = minRadius
 	else
-		-- Linear interpolation from full to zero
+		-- Linear interpolation from full to minimum radius
 		local t = (elapsed - WormConfig.ShrinkStartTime) / (WormConfig.ShrinkEndTime - WormConfig.ShrinkStartTime)
-		self._currentRadius = HALF_ARENA * (1 - t)
+		self._currentRadius = HALF_ARENA + (minRadius - HALF_ARENA) * t
 	end
 
 	self:_updateRingVisual()

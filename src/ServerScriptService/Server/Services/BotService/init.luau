@@ -534,10 +534,11 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 		return
 	end
 
-	-- Apply speed power-up multiplier
-	local speed = WormConfig.BaseSpeed * PowerUpService:GetSpeedMultiplier(botData.Name)
+	-- Apply speed power-up multiplier and size scaling
+	local sizeScale = 1 / (1 + botData.Segments * WormConfig.SpeedScaleFactor)
+	local speed = WormConfig.BaseSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(botData.Name)
 	if botData.Boosting and botData.Segments > WormConfig.MinBoostSegments then
-		speed = WormConfig.BoostSpeed * PowerUpService:GetSpeedMultiplier(botData.Name)
+		speed = WormConfig.BoostSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(botData.Name)
 		local prevFloor = math.floor(botData.Segments)
 		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
 		botData.Segments = math.max(WormConfig.MinBoostSegments, botData.Segments - segmentsToLose)

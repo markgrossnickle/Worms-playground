@@ -11,7 +11,7 @@ local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-local LEADERBOARD_UPDATE_INTERVAL = 2
+local PERIODIC_UPDATE_INTERVAL = 2
 local KILL_FEED_DURATION = 4
 local MAX_KILL_FEED = 5
 
@@ -32,7 +32,6 @@ local WormUIController = Knit.CreateController({
 	_deathFrame = nil :: Frame?,
 	_deathLabel = nil :: TextLabel?,
 	_killFeedFrame = nil :: Frame?,
-	_leaderboardFrame = nil :: Frame?,
 	_minimapFrame = nil :: Frame?,
 	_boostButton = nil :: ImageButton?,
 	_powerUpFrame = nil :: Frame?,
@@ -99,7 +98,6 @@ function WormUIController:_buildUI()
 	self:_buildSegmentCounter(gui)
 	self:_buildDeathScreen(gui)
 	self:_buildKillFeed(gui)
-	self:_buildLeaderboard(gui)
 	self:_buildMinimap(gui)
 	self:_buildBoostButton(gui)
 	self:_buildPowerUpDisplay(gui)
@@ -183,8 +181,8 @@ function WormUIController:_buildKillFeed(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "KillFeed"
 	frame.Size = UDim2.new(0, 300, 0, MAX_KILL_FEED * 28)
-	frame.Position = UDim2.new(1, -10, 0, 60)
-	frame.AnchorPoint = Vector2.new(1, 0)
+	frame.Position = UDim2.new(0, 10, 0, 60)
+	frame.AnchorPoint = Vector2.new(0, 0)
 	frame.BackgroundTransparency = 1
 	frame.BorderSizePixel = 0
 	frame.Parent = parent
@@ -194,46 +192,6 @@ function WormUIController:_buildKillFeed(parent: ScreenGui)
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.Padding = UDim.new(0, 2)
 	layout.Parent = frame
-end
-
-function WormUIController:_buildLeaderboard(parent: ScreenGui)
-	local frame = Instance.new("Frame")
-	frame.Name = "Leaderboard"
-	frame.Size = UDim2.new(0, 220, 0, 230)
-	frame.Position = UDim2.new(0, 10, 0, 60)
-	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-	frame.BackgroundTransparency = 0.5
-	frame.BorderSizePixel = 0
-	frame.Parent = parent
-	self._leaderboardFrame = frame
-
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = frame
-
-	createTextLabel({
-		Name = "Title",
-		Text = "Leaderboard",
-		Size = UDim2.new(1, 0, 0, 28),
-		Position = UDim2.fromScale(0, 0),
-		TextSize = 16,
-		Font = Enum.Font.GothamBold,
-		BackgroundTransparency = 0.7,
-		BackgroundColor3 = Color3.fromRGB(40, 40, 40),
-		Parent = frame,
-	})
-
-	local list = Instance.new("Frame")
-	list.Name = "List"
-	list.Size = UDim2.new(1, 0, 1, -28)
-	list.Position = UDim2.new(0, 0, 0, 28)
-	list.BackgroundTransparency = 1
-	list.Parent = frame
-
-	local layout = Instance.new("UIListLayout")
-	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(0, 1)
-	layout.Parent = list
 end
 
 function WormUIController:_buildMinimap(parent: ScreenGui)
@@ -455,7 +413,7 @@ function WormUIController:_addKillFeedEntry(deadName: string, killerName: string
 		Size = UDim2.new(1, 0, 0, 26),
 		Position = UDim2.fromScale(0, 0),
 		TextSize = 14,
-		TextXAlignment = Enum.TextXAlignment.Right,
+		TextXAlignment = Enum.TextXAlignment.Left,
 		BackgroundColor3 = Color3.fromRGB(0, 0, 0),
 		BackgroundTransparency = 0.5,
 		Parent = killFeed,
@@ -483,51 +441,6 @@ function WormUIController:_addKillFeedEntry(deadName: string, killerName: string
 	while #entries > MAX_KILL_FEED do
 		entries[1]:Destroy()
 		table.remove(entries, 1)
-	end
-end
-
-function WormUIController:_updateLeaderboard()
-	if not self._wormService or not self._leaderboardFrame then
-		return
-	end
-
-	local ok, board = pcall(function()
-		return self._wormService:GetLeaderboard()
-	end)
-	if not ok or not board then
-		return
-	end
-
-	local list = self._leaderboardFrame:FindFirstChild("List") :: Frame?
-	if not list then
-		return
-	end
-
-	-- Clear old entries
-	for _, child in list:GetChildren() do
-		if child:IsA("TextLabel") then
-			child:Destroy()
-		end
-	end
-
-	-- Add top 10
-	for i = 1, math.min(#board, 10) do
-		local entry = board[i]
-		local segments = tonumber(entry.Segments) or 0
-
-		local isLocal = entry.Name == LocalPlayer.Name
-		local color = if isLocal then Color3.fromRGB(255, 255, 100) else Color3.new(1, 1, 1)
-
-		createTextLabel({
-			Name = "Entry" .. i,
-			Text = i .. ". " .. entry.Name .. " - " .. segments,
-			Size = UDim2.new(1, -8, 0, 20),
-			Position = UDim2.new(0, 4, 0, 0),
-			TextSize = 13,
-			TextColor3 = color,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Parent = list,
-		})
 	end
 end
 
@@ -742,21 +655,23 @@ function WormUIController:KnitStart()
 		self:_showZoneWarning(message)
 	end))
 
-	-- Wire kill feed to server signal
+	-- Wire kill feed to server signal (skip local player's own death — death screen covers it)
 	self._trove:Add(self._wormService.WormDied:Connect(function(deadName: string, killerName: string?)
+		if deadName == LocalPlayer.Name then
+			return
+		end
 		self:_addKillFeedEntry(deadName, killerName)
 	end))
 
 	-- Connect food signal (suppress Knit warning)
 	self._trove:Add(self._wormService.FoodSpawned:Connect(function(_position: Vector3, _color: Color3) end))
 
-	-- Periodic leaderboard + minimap + power-up timer updates
+	-- Periodic minimap + power-up timer updates
 	self._trove:Add(task.spawn(function()
 		while true do
-			self:_updateLeaderboard()
 			self:_updateMinimap()
 			self:_updatePowerUpTimer()
-			task.wait(LEADERBOARD_UPDATE_INTERVAL)
+			task.wait(PERIODIC_UPDATE_INTERVAL)
 		end
 	end))
 end

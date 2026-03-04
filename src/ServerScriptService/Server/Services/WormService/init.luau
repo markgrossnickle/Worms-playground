@@ -71,6 +71,16 @@ function WormService:_randomColor(): Color3
 	return Color3.fromHSV(math.random(), 0.8, 0.9)
 end
 
+function WormService:_updateLeaderstats(player: Player, segments: number)
+	local leaderstats = player:FindFirstChild("leaderstats")
+	if leaderstats then
+		local segValue = leaderstats:FindFirstChild("Segments") :: IntValue?
+		if segValue then
+			segValue.Value = math.floor(segments)
+		end
+	end
+end
+
 function WormService:_createArena()
 	-- Remove default Studio baseplate to avoid z-fighting
 	local baseplate = workspace:FindFirstChild("Baseplate")
@@ -416,6 +426,8 @@ function WormService:_spawnWorm(player: Player)
 		TeamService:AssignToTeam(player.Name)
 	end
 
+	self:_updateLeaderstats(player, wormData.Segments)
+
 	self.Client.WormSpawned:Fire(player, {
 		Segments = wormData.Segments,
 		Color = { wormData.Color.R, wormData.Color.G, wormData.Color.B },
@@ -436,6 +448,7 @@ function WormService:_killWorm(player: Player, killer: Player?, killerBotName: s
 	self:_dropFoodFromWorm(player, segmentsToDrop)
 
 	wormData.State = "Dead" :: WormState
+	self:_updateLeaderstats(player, 0)
 
 	-- Credit killer
 	if killer and killer ~= player then
@@ -524,6 +537,7 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 
 				self.Client.WormAte:Fire(player, wormData.Segments)
 				self.PlayerScoreChanged:Fire(player, wormData.Segments)
+				self:_updateLeaderstats(player, wormData.Segments)
 			end
 		end
 	end
@@ -666,10 +680,11 @@ function WormService:_updateMovement(player: Player, dt: number)
 		return
 	end
 
-	-- Handle boosting and power-up speed
-	local speed = WormConfig.BaseSpeed * PowerUpService:GetSpeedMultiplier(player.Name)
+	-- Handle boosting and power-up speed (larger worms move slower)
+	local sizeScale = 1 / (1 + wormData.Segments * WormConfig.SpeedScaleFactor)
+	local speed = WormConfig.BaseSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(player.Name)
 	if wormData.Boosting and wormData.Segments > WormConfig.MinBoostSegments then
-		speed = WormConfig.BoostSpeed * PowerUpService:GetSpeedMultiplier(player.Name)
+		speed = WormConfig.BoostSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(player.Name)
 		local prevFloor = math.floor(wormData.Segments)
 		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
 		wormData.Segments = math.max(WormConfig.MinBoostSegments, wormData.Segments - segmentsToLose)
@@ -687,6 +702,7 @@ function WormService:_updateMovement(player: Player, dt: number)
 				end
 			end
 			self.Client.WormAte:Fire(player, newFloor)
+			self:_updateLeaderstats(player, newFloor)
 		end
 	end
 
@@ -800,6 +816,7 @@ function WormService:AddSegments(ownerName: string, count: number)
 			end
 			self.Client.WormAte:Fire(player, wormData.Segments)
 			self.PlayerScoreChanged:Fire(player, wormData.Segments)
+			self:_updateLeaderstats(player, wormData.Segments)
 			return
 		end
 	end
@@ -914,6 +931,16 @@ function WormService:KnitStart()
 		local trove = Trove.new()
 		self._troves[player] = trove
 
+		-- Set up Roblox built-in leaderboard
+		local leaderstats = Instance.new("Folder")
+		leaderstats.Name = "leaderstats"
+		leaderstats.Parent = player
+
+		local segmentsValue = Instance.new("IntValue")
+		segmentsValue.Name = "Segments"
+		segmentsValue.Value = WormConfig.InitialSegments
+		segmentsValue.Parent = leaderstats
+
 		self._worms[player] = newWormData(self:_randomColor())
 
 		trove:Connect(player.CharacterAdded, function(character: Model)
@@ -954,6 +981,18 @@ function WormService:KnitStart()
 		task.spawn(function()
 			local trove = Trove.new()
 			self._troves[player] = trove
+
+			-- Set up Roblox built-in leaderboard
+			if not player:FindFirstChild("leaderstats") then
+				local leaderstats = Instance.new("Folder")
+				leaderstats.Name = "leaderstats"
+				leaderstats.Parent = player
+
+				local segmentsValue = Instance.new("IntValue")
+				segmentsValue.Name = "Segments"
+				segmentsValue.Value = WormConfig.InitialSegments
+				segmentsValue.Parent = leaderstats
+			end
 
 			self._worms[player] = newWormData(self:_randomColor())
 
