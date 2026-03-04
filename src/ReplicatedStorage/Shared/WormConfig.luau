@@ -11,7 +11,7 @@ return {
 	MinBoostSegments = 5,
 
 	-- Segments
-	SegmentSpacing = 3,
+	SegmentSpacing = 1.5,
 	SegmentSize = 2.5,
 	InitialSegments = 3,
 
@@ -46,6 +46,10 @@ return {
 		SHIELD = { Duration = 0 }, -- one-time save, no duration
 		SIZE_BOMB = { Duration = 0, SegmentsAdded = 5 }, -- instant effect
 	},
+
+	-- Rounds
+	RoundScoreboardDuration = 8,
+	RoundCountdownDuration = 10,
 
 	-- Shrink zone (battle royale)
 	ShrinkStartTime = 60, -- seconds after game start before shrinking begins

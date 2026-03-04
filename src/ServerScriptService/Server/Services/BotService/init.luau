@@ -5,6 +5,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
+local Signal = require(ReplicatedStorage.Packages.Signal)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 
 local WormService -- Set in KnitStart via require
@@ -56,9 +57,11 @@ type BotData = {
 	Model: Model,
 	State: string,
 	Segments: number,
+	MaxSegments: number,
 	Direction: Vector3,
 	Boosting: boolean,
 	Color: Color3,
+	Kills: number,
 	PositionHistory: { [number]: Vector3 },
 	HistoryStart: number,
 	HistoryEnd: number,
@@ -73,6 +76,10 @@ local BotService = Knit.CreateService({
 
 	_bots = {} :: { [string]: BotData },
 	_usedNames = {} :: { [string]: boolean },
+	_roundActive = false,
+	_roundBotStats = {} :: { [string]: { Kills: number, MaxSegments: number } },
+
+	BotKilled = Signal.new(),
 })
 
 --------------------------------------------------
@@ -262,9 +269,11 @@ function BotService:_spawnBot()
 		Model = model,
 		State = "Alive",
 		Segments = WormConfig.InitialSegments,
+		MaxSegments = WormConfig.InitialSegments,
 		Direction = direction,
 		Boosting = false,
 		Color = color,
+		Kills = 0,
 		PositionHistory = {},
 		HistoryStart = 1,
 		HistoryEnd = 0,
@@ -301,6 +310,22 @@ function BotService:_killBot(botName: string, killerName: string?)
 
 	botData.State = "Dead"
 
+	-- Save round stats before cleanup
+	self._roundBotStats[botName] = {
+		Kills = botData.Kills,
+		MaxSegments = math.floor(botData.MaxSegments),
+	}
+
+	-- Credit killer (look up killer as bot or player)
+	if killerName then
+		-- Check if killer is a bot
+		local killerBot = self._bots[killerName]
+		if killerBot and killerBot.State == "Alive" then
+			killerBot.Kills += 1
+		end
+		-- Player kill crediting is handled in WormService._killWorm
+	end
+
 	-- Clear any active power-up
 	PowerUpService:ClearActivePowerUp(botName)
 
@@ -319,6 +344,9 @@ function BotService:_killBot(botName: string, killerName: string?)
 
 	self._usedNames[botName] = nil
 	self._bots[botName] = nil
+
+	-- Fire signal for RoundService to track eliminations
+	self.BotKilled:Fire(botName, killerName)
 end
 
 --------------------------------------------------
@@ -634,6 +662,9 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 				if WormService:ConsumeFood(food) then
 					local prevFloor = math.floor(botData.Segments)
 					botData.Segments += foodValue
+					if botData.Segments > botData.MaxSegments then
+						botData.MaxSegments = botData.Segments
+					end
 					local newFloor = math.floor(botData.Segments)
 					for i = prevFloor + 1, newFloor do
 						self:_createSegment(botData, i)
@@ -725,6 +756,101 @@ function BotService:_checkBotCollisions(botData: BotData)
 end
 
 --------------------------------------------------
+-- Round API (called by RoundService)
+--------------------------------------------------
+
+function BotService:_fillBots()
+	local playerCount = #Players:GetPlayers()
+	local botCount = 0
+	for _ in self._bots do
+		botCount += 1
+	end
+
+	local totalWorms = playerCount + botCount
+	local botsNeeded = TARGET_TOTAL_WORMS - totalWorms
+
+	for _ = 1, math.max(0, botsNeeded) do
+		self:_spawnBot()
+	end
+end
+
+function BotService:SetRoundActive(active: boolean)
+	self._roundActive = active
+end
+
+function BotService:GetAliveCount(): number
+	local count = 0
+	for _, botData in self._bots do
+		if botData.State == "Alive" then
+			count += 1
+		end
+	end
+	return count
+end
+
+function BotService:GetAliveBotNames(): { string }
+	local names = {}
+	for name, botData in self._bots do
+		if botData.State == "Alive" then
+			table.insert(names, name)
+		end
+	end
+	return names
+end
+
+function BotService:KillAllBots()
+	local toKill = {}
+	for name, botData in self._bots do
+		if botData.State == "Alive" then
+			table.insert(toKill, name)
+		end
+	end
+	for _, name in toKill do
+		local botData = self._bots[name]
+		if botData then
+			-- Save stats
+			self._roundBotStats[name] = {
+				Kills = botData.Kills,
+				MaxSegments = math.floor(botData.MaxSegments),
+			}
+			PowerUpService:ClearActivePowerUp(name)
+			WormService:UnregisterBot(name)
+			if TeamService:IsEnabled() then
+				TeamService:RemoveFromTeam(name)
+			end
+			botData.Model:Destroy()
+			self._usedNames[name] = nil
+			self._bots[name] = nil
+		end
+	end
+end
+
+function BotService:ClearRoundStats()
+	self._roundBotStats = {}
+end
+
+function BotService:SpawnBotsToFill()
+	self:_fillBots()
+end
+
+function BotService:GetRoundStats(): { [string]: { Kills: number, MaxSegments: number } }
+	-- Combine alive bot stats + saved dead bot stats
+	local stats = {}
+	for name, botData in self._bots do
+		stats[name] = {
+			Kills = botData.Kills,
+			MaxSegments = math.floor(botData.MaxSegments),
+		}
+	end
+	for name, savedStats in self._roundBotStats do
+		if not stats[name] then
+			stats[name] = savedStats
+		end
+	end
+	return stats
+end
+
+--------------------------------------------------
 -- Knit lifecycle
 --------------------------------------------------
 
@@ -736,23 +862,14 @@ function BotService:KnitStart()
 	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
 	TeamService = require(script.Parent.TeamService)
 
-	-- Spawn management loop
+	-- Spawn management loop — only fills when round is active
 	task.spawn(function()
 		-- Small delay to let WormService finish initializing
 		task.wait(1)
 
 		while true do
-			local playerCount = #Players:GetPlayers()
-			local botCount = 0
-			for _ in self._bots do
-				botCount += 1
-			end
-
-			local totalWorms = playerCount + botCount
-			local botsNeeded = TARGET_TOTAL_WORMS - totalWorms
-
-			for _ = 1, math.max(0, botsNeeded) do
-				self:_spawnBot()
+			if self._roundActive then
+				self:_fillBots()
 			end
 
 			task.wait(SPAWN_CHECK_INTERVAL)

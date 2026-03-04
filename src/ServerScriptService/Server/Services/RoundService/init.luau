@@ -1,0 +1,266 @@
+--!strict
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Knit = require(ReplicatedStorage.Packages.Knit)
+local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+
+local WormService -- Set in KnitStart
+local BotService -- Set in KnitStart
+local ShrinkZoneService -- Set in KnitStart
+local PowerUpService -- Set in KnitStart
+
+type EliminationEntry = {
+	Name: string,
+	IsBot: boolean,
+	Placement: number,
+	Kills: number,
+	MaxSegments: number,
+}
+
+local RoundService = Knit.CreateService({
+	Name = "RoundService",
+	Client = {
+		RoundEnded = Knit.CreateSignal(),
+		RoundCountdown = Knit.CreateSignal(),
+		RoundStarted = Knit.CreateSignal(),
+		ForceSpectate = Knit.CreateSignal(),
+	},
+
+	_roundActive = false,
+	_eliminationOrder = {} :: { EliminationEntry },
+	_pollConnection = nil :: RBXScriptConnection?,
+})
+
+--------------------------------------------------
+-- Round lifecycle
+--------------------------------------------------
+
+function RoundService:_startRound()
+	self._eliminationOrder = {}
+	self._roundActive = true
+
+	-- Reset game state
+	ShrinkZoneService:Reset()
+	PowerUpService:Reset()
+	WormService:ResetFood()
+
+	-- Tell services the round is active
+	WormService:SetRoundActive(true)
+	BotService:SetRoundActive(true)
+
+	-- Clear bot stats from previous round
+	BotService:ClearRoundStats()
+
+	-- Spawn all current players
+	for _, player in Players:GetPlayers() do
+		WormService:SpawnWormForRound(player)
+	end
+
+	-- Spawn bots to fill
+	BotService:SpawnBotsToFill()
+
+	-- Notify clients
+	self.Client.RoundStarted:FireAll()
+
+	-- Start polling win condition
+	self:_startPollWinCondition()
+end
+
+function RoundService:_startPollWinCondition()
+	if self._pollConnection then
+		self._pollConnection:Disconnect()
+		self._pollConnection = nil
+	end
+
+	self._pollConnection = task.spawn(function()
+		-- Small delay before first check to let spawns complete
+		task.wait(2)
+
+		while self._roundActive do
+			local playerAlive = WormService:GetAliveCount()
+			local botAlive = BotService:GetAliveCount()
+			local totalAlive = playerAlive + botAlive
+
+			if totalAlive <= 1 then
+				self:_endRound()
+				return
+			end
+
+			task.wait(0.5)
+		end
+	end) :: any
+end
+
+function RoundService:_endRound()
+	self._roundActive = false
+	WormService:SetRoundActive(false)
+	BotService:SetRoundActive(false)
+
+	-- Collect survivor stats (the last one(s) standing)
+	local alivePlayers = WormService:GetAlivePlayers()
+	local aliveBotNames = BotService:GetAliveBotNames()
+
+	local playerStats = WormService:GetRoundStats()
+	local botStats = BotService:GetRoundStats()
+
+	-- Add survivors to elimination order (they get best placement)
+	for _, player in alivePlayers do
+		local stats = playerStats[player.Name]
+		table.insert(self._eliminationOrder, {
+			Name = player.Name,
+			IsBot = false,
+			Placement = 0, -- will be assigned below
+			Kills = if stats then stats.Kills else 0,
+			MaxSegments = if stats then stats.MaxSegments else 0,
+		})
+	end
+	for _, botName in aliveBotNames do
+		local stats = botStats[botName]
+		table.insert(self._eliminationOrder, {
+			Name = botName,
+			IsBot = true,
+			Placement = 0,
+			Kills = if stats then stats.Kills else 0,
+			MaxSegments = if stats then stats.MaxSegments else 0,
+		})
+	end
+
+	-- Assign placements: survivors = 1, eliminated in reverse death order
+	-- eliminationOrder: entries added later = survived longer = better placement
+	local totalEntries = #self._eliminationOrder
+	for i, entry in self._eliminationOrder do
+		-- First eliminated = worst placement, last = best (1)
+		entry.Placement = totalEntries - i + 1
+	end
+
+	-- Build sorted results (placement 1 first)
+	local results = {}
+	for _, entry in self._eliminationOrder do
+		table.insert(results, {
+			Name = entry.Name,
+			IsBot = entry.IsBot,
+			Placement = entry.Placement,
+			Kills = entry.Kills,
+			MaxSegments = entry.MaxSegments,
+		})
+	end
+	table.sort(results, function(a, b)
+		return a.Placement < b.Placement
+	end)
+
+	-- Fire round ended to all clients
+	self.Client.RoundEnded:FireAll(results)
+
+	-- Kill all remaining worms/bots
+	WormService:KillAllWorms()
+	BotService:KillAllBots()
+
+	-- Wait for scoreboard duration, then run countdown
+	task.wait(WormConfig.RoundScoreboardDuration)
+	self:_runCountdown()
+end
+
+function RoundService:_runCountdown()
+	for i = WormConfig.RoundCountdownDuration, 1, -1 do
+		self.Client.RoundCountdown:FireAll(i)
+		task.wait(1)
+	end
+
+	self:_startRound()
+end
+
+function RoundService:_recordElimination(name: string, isBot: boolean, kills: number, maxSegments: number)
+	table.insert(self._eliminationOrder, {
+		Name = name,
+		IsBot = isBot,
+		Placement = 0, -- assigned at round end
+		Kills = kills,
+		MaxSegments = maxSegments,
+	})
+end
+
+--------------------------------------------------
+-- Knit lifecycle
+--------------------------------------------------
+
+function RoundService:KnitInit() end
+
+function RoundService:KnitStart()
+	WormService = require(script.Parent.WormService)
+	BotService = require(script.Parent.BotService)
+	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
+	PowerUpService = require(script.Parent.PowerUpService)
+
+	-- Track player eliminations
+	WormService.PlayerKilled:Connect(function(killer: Player, victim: Player)
+		local wormData = WormService:GetWormData_Server(victim)
+		self:_recordElimination(victim.Name, false, if wormData then wormData.Kills else 0, if wormData then math.floor(wormData.MaxSegments) else 0)
+	end)
+
+	-- Track player deaths from non-player causes (walls, zone)
+	-- WormDied fires for all deaths; PlayerKilled only fires for player-kills-player
+	-- We listen to WormDied on the client signal to catch wall/zone deaths
+	WormService.Client.WormDied:Connect(function(deadName: string, _killerName: string?)
+		-- Check if this was a player (not bot — bots go through BotKilled)
+		local deadPlayer = Players:FindFirstChild(deadName) :: Player?
+		if not deadPlayer then
+			return
+		end
+		-- Avoid double-recording: check if already in elimination order
+		for _, entry in self._eliminationOrder do
+			if entry.Name == deadName then
+				return
+			end
+		end
+		local wormData = WormService:GetWormData_Server(deadPlayer)
+		self:_recordElimination(
+			deadName,
+			false,
+			if wormData then wormData.Kills else 0,
+			if wormData then math.floor(wormData.MaxSegments) else 0
+		)
+	end)
+
+	-- Track bot eliminations
+	BotService.BotKilled:Connect(function(botName: string, _killerName: string?)
+		local botStats = BotService:GetRoundStats()
+		local stats = botStats[botName]
+		self:_recordElimination(botName, true, if stats then stats.Kills else 0, if stats then stats.MaxSegments else 0)
+	end)
+
+	-- Handle players leaving mid-round
+	Players.PlayerRemoving:Connect(function(player: Player)
+		if not self._roundActive then
+			return
+		end
+		-- Check if they were alive
+		local wormData = WormService:GetWormData_Server(player)
+		if wormData and wormData.State == "Alive" then
+			-- Record elimination as if they died
+			self:_recordElimination(
+				player.Name,
+				false,
+				wormData.Kills,
+				math.floor(wormData.MaxSegments)
+			)
+		end
+	end)
+
+	-- Handle late joiners during a round
+	Players.PlayerAdded:Connect(function(player: Player)
+		if self._roundActive then
+			-- Small delay for client to set up
+			task.wait(1)
+			self.Client.ForceSpectate:Fire(player)
+		end
+	end)
+
+	-- Start first round after a short delay
+	task.delay(3, function()
+		self:_startRound()
+	end)
+end
+
+return RoundService

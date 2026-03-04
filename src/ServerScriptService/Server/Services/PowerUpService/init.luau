@@ -271,6 +271,23 @@ function PowerUpService:ClearActivePowerUp(ownerName: string)
 end
 
 --------------------------------------------------
+-- Round reset
+--------------------------------------------------
+
+function PowerUpService:Reset()
+	-- Remove all on-map power-ups
+	for id in self._powerUps do
+		self:_removePowerUp(id)
+	end
+	-- Clear active effects
+	for ownerName, active in self._activePowerUps do
+		self.Client.PowerUpExpired:FireAll(ownerName, active.Type)
+	end
+	self._activePowerUps = {}
+	self._nextSpawnTime = os.clock() + 5
+end
+
+--------------------------------------------------
 -- Game loop
 --------------------------------------------------
 

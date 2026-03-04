@@ -124,6 +124,19 @@ function ShrinkZoneService:_update()
 end
 
 --------------------------------------------------
+-- Round reset
+--------------------------------------------------
+
+function ShrinkZoneService:Reset()
+	self._gameStartTime = os.clock()
+	self._currentRadius = HALF_ARENA
+	self._warnedStart = false
+	self._warned30s = false
+	self._lastClientUpdate = 0
+	self:_updateRingVisual()
+end
+
+--------------------------------------------------
 -- Knit lifecycle
 --------------------------------------------------
 

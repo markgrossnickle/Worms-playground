@@ -45,6 +45,18 @@ local WormUIController = Knit.CreateController({
 	_powerUpService = nil :: any,
 	_currentZoneRadius = WormConfig.ArenaSize / 2,
 	_activePowerUpEnd = 0,
+
+	-- Round UI elements
+	_statsLabel = nil :: TextLabel?,
+	_spectateSection = nil :: Frame?,
+	_spectateLabel = nil :: TextLabel?,
+	_spectateButtonPrev = nil :: TextButton?,
+	_spectateButtonNext = nil :: TextButton?,
+	_finalScoreboardFrame = nil :: Frame?,
+	_scoreboardList = nil :: Frame?,
+	_scoreboardWinner = nil :: TextLabel?,
+	_countdownFrame = nil :: Frame?,
+	_countdownLabel = nil :: TextLabel?,
 })
 
 --------------------------------------------------
@@ -103,6 +115,8 @@ function WormUIController:_buildUI()
 	self:_buildPowerUpDisplay(gui)
 	self:_buildGameTimer(gui)
 	self:_buildZoneWarning(gui)
+	self:_buildFinalScoreboard(gui)
+	self:_buildCountdownOverlay(gui)
 end
 
 function WormUIController:_buildSegmentCounter(parent: ScreenGui)
@@ -147,7 +161,7 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 		Name = "Title",
 		Text = "YOU DIED",
 		Size = UDim2.new(0, 400, 0, 60),
-		Position = UDim2.fromScale(0.5, 0.35),
+		Position = UDim2.fromScale(0.5, 0.3),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		TextSize = 48,
 		TextColor3 = Color3.fromRGB(255, 50, 50),
@@ -159,22 +173,96 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 		Name = "Info",
 		Text = "",
 		Size = UDim2.new(0, 400, 0, 40),
-		Position = UDim2.fromScale(0.5, 0.45),
+		Position = UDim2.fromScale(0.5, 0.38),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		TextSize = 22,
 		Parent = frame,
 	})
 
-	createTextLabel({
-		Name = "Respawn",
-		Text = "Respawning in " .. WormConfig.RespawnDelay .. "s...",
-		Size = UDim2.new(0, 300, 0, 30),
-		Position = UDim2.fromScale(0.5, 0.55),
+	-- Stats label: "Max Size: N | Kills: N"
+	self._statsLabel = createTextLabel({
+		Name = "Stats",
+		Text = "",
+		Size = UDim2.new(0, 400, 0, 30),
+		Position = UDim2.fromScale(0.5, 0.45),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		TextSize = 18,
 		TextColor3 = Color3.fromRGB(200, 200, 200),
 		Parent = frame,
 	})
+
+	-- Spectate section
+	local spectateSection = Instance.new("Frame")
+	spectateSection.Name = "SpectateSection"
+	spectateSection.Size = UDim2.new(0, 400, 0, 80)
+	spectateSection.Position = UDim2.fromScale(0.5, 0.58)
+	spectateSection.AnchorPoint = Vector2.new(0.5, 0.5)
+	spectateSection.BackgroundTransparency = 1
+	spectateSection.BorderSizePixel = 0
+	spectateSection.Parent = frame
+	self._spectateSection = spectateSection
+
+	createTextLabel({
+		Name = "SpectateTitle",
+		Text = "SPECTATING",
+		Size = UDim2.new(1, 0, 0, 20),
+		Position = UDim2.fromScale(0.5, 0),
+		AnchorPoint = Vector2.new(0.5, 0),
+		TextSize = 14,
+		TextColor3 = Color3.fromRGB(150, 150, 150),
+		Parent = spectateSection,
+	})
+
+	self._spectateLabel = createTextLabel({
+		Name = "TargetName",
+		Text = "---",
+		Size = UDim2.new(0, 200, 0, 30),
+		Position = UDim2.fromScale(0.5, 0.4),
+		AnchorPoint = Vector2.new(0.5, 0),
+		TextSize = 22,
+		TextColor3 = Color3.fromRGB(255, 255, 100),
+		Parent = spectateSection,
+	})
+
+	-- Prev button
+	local prevBtn = Instance.new("TextButton")
+	prevBtn.Name = "PrevBtn"
+	prevBtn.Size = UDim2.new(0, 60, 0, 30)
+	prevBtn.Position = UDim2.new(0.5, -110, 1, -5)
+	prevBtn.AnchorPoint = Vector2.new(0.5, 1)
+	prevBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	prevBtn.BackgroundTransparency = 0.3
+	prevBtn.BorderSizePixel = 0
+	prevBtn.Text = "< Prev"
+	prevBtn.TextColor3 = Color3.new(1, 1, 1)
+	prevBtn.TextSize = 14
+	prevBtn.Font = Enum.Font.GothamBold
+	prevBtn.Parent = spectateSection
+	self._spectateButtonPrev = prevBtn
+
+	local prevCorner = Instance.new("UICorner")
+	prevCorner.CornerRadius = UDim.new(0, 6)
+	prevCorner.Parent = prevBtn
+
+	-- Next button
+	local nextBtn = Instance.new("TextButton")
+	nextBtn.Name = "NextBtn"
+	nextBtn.Size = UDim2.new(0, 60, 0, 30)
+	nextBtn.Position = UDim2.new(0.5, 110, 1, -5)
+	nextBtn.AnchorPoint = Vector2.new(0.5, 1)
+	nextBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	nextBtn.BackgroundTransparency = 0.3
+	nextBtn.BorderSizePixel = 0
+	nextBtn.Text = "Next >"
+	nextBtn.TextColor3 = Color3.new(1, 1, 1)
+	nextBtn.TextSize = 14
+	nextBtn.Font = Enum.Font.GothamBold
+	nextBtn.Parent = spectateSection
+	self._spectateButtonNext = nextBtn
+
+	local nextCorner = Instance.new("UICorner")
+	nextCorner.CornerRadius = UDim.new(0, 6)
+	nextCorner.Parent = nextBtn
 end
 
 function WormUIController:_buildKillFeed(parent: ScreenGui)
@@ -369,6 +457,143 @@ function WormUIController:_buildZoneWarning(parent: ScreenGui)
 	})
 end
 
+function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
+	local frame = Instance.new("Frame")
+	frame.Name = "FinalScoreboard"
+	frame.Size = UDim2.fromScale(1, 1)
+	frame.Position = UDim2.fromScale(0, 0)
+	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	frame.BackgroundTransparency = 0.3
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.ZIndex = 10
+	frame.Parent = parent
+	self._finalScoreboardFrame = frame
+
+	createTextLabel({
+		Name = "Title",
+		Text = "ROUND OVER",
+		Size = UDim2.new(0, 400, 0, 50),
+		Position = UDim2.fromScale(0.5, 0.1),
+		AnchorPoint = Vector2.new(0.5, 0),
+		TextSize = 40,
+		TextColor3 = Color3.fromRGB(255, 220, 50),
+		Font = Enum.Font.GothamBold,
+		Parent = frame,
+	})
+
+	self._scoreboardWinner = createTextLabel({
+		Name = "Winner",
+		Text = "",
+		Size = UDim2.new(0, 400, 0, 35),
+		Position = UDim2.fromScale(0.5, 0.18),
+		AnchorPoint = Vector2.new(0.5, 0),
+		TextSize = 28,
+		TextColor3 = Color3.fromRGB(100, 255, 100),
+		Font = Enum.Font.GothamBold,
+		Parent = frame,
+	})
+
+	-- Header row
+	local headerFrame = Instance.new("Frame")
+	headerFrame.Name = "Header"
+	headerFrame.Size = UDim2.new(0, 500, 0, 30)
+	headerFrame.Position = UDim2.fromScale(0.5, 0.26)
+	headerFrame.AnchorPoint = Vector2.new(0.5, 0)
+	headerFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	headerFrame.BackgroundTransparency = 0.3
+	headerFrame.BorderSizePixel = 0
+	headerFrame.ZIndex = 11
+	headerFrame.Parent = frame
+
+	local headerCorner = Instance.new("UICorner")
+	headerCorner.CornerRadius = UDim.new(0, 4)
+	headerCorner.Parent = headerFrame
+
+	createTextLabel({
+		Name = "H1",
+		Text = "#",
+		Size = UDim2.new(0, 40, 1, 0),
+		Position = UDim2.fromOffset(5, 0),
+		TextSize = 14,
+		TextColor3 = Color3.fromRGB(180, 180, 180),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = headerFrame,
+	})
+	createTextLabel({
+		Name = "H2",
+		Text = "Name",
+		Size = UDim2.new(0, 200, 1, 0),
+		Position = UDim2.fromOffset(50, 0),
+		TextSize = 14,
+		TextColor3 = Color3.fromRGB(180, 180, 180),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = headerFrame,
+	})
+	createTextLabel({
+		Name = "H3",
+		Text = "Kills",
+		Size = UDim2.new(0, 80, 1, 0),
+		Position = UDim2.fromOffset(270, 0),
+		TextSize = 14,
+		TextColor3 = Color3.fromRGB(180, 180, 180),
+		Parent = headerFrame,
+	})
+	createTextLabel({
+		Name = "H4",
+		Text = "Max Size",
+		Size = UDim2.new(0, 100, 1, 0),
+		Position = UDim2.fromOffset(370, 0),
+		TextSize = 14,
+		TextColor3 = Color3.fromRGB(180, 180, 180),
+		Parent = headerFrame,
+	})
+
+	-- Scrolling list container
+	local scrollFrame = Instance.new("ScrollingFrame")
+	scrollFrame.Name = "List"
+	scrollFrame.Size = UDim2.new(0, 500, 0, 300)
+	scrollFrame.Position = UDim2.fromScale(0.5, 0.3)
+	scrollFrame.AnchorPoint = Vector2.new(0.5, 0)
+	scrollFrame.BackgroundTransparency = 1
+	scrollFrame.BorderSizePixel = 0
+	scrollFrame.ScrollBarThickness = 4
+	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scrollFrame.ZIndex = 11
+	scrollFrame.Parent = frame
+	self._scoreboardList = scrollFrame
+
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	listLayout.Padding = UDim.new(0, 2)
+	listLayout.Parent = scrollFrame
+end
+
+function WormUIController:_buildCountdownOverlay(parent: ScreenGui)
+	local frame = Instance.new("Frame")
+	frame.Name = "CountdownOverlay"
+	frame.Size = UDim2.fromScale(1, 1)
+	frame.Position = UDim2.fromScale(0, 0)
+	frame.BackgroundTransparency = 1
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.ZIndex = 12
+	frame.Parent = parent
+	self._countdownFrame = frame
+
+	self._countdownLabel = createTextLabel({
+		Name = "CountdownText",
+		Text = "",
+		Size = UDim2.new(0, 400, 0, 80),
+		Position = UDim2.fromScale(0.5, 0.4),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		TextSize = 48,
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		Font = Enum.Font.GothamBold,
+		Parent = frame,
+	})
+end
+
 --------------------------------------------------
 -- UI updates
 --------------------------------------------------
@@ -379,15 +604,19 @@ function WormUIController:_updateSegmentCounter(segments: number)
 	end
 end
 
-function WormUIController:_showDeathScreen(killerName: string?)
+function WormUIController:_showDeathScreen(deathInfo: { KillerName: string?, MaxSegments: number, Kills: number })
 	if not self._deathFrame or not self._deathLabel then
 		return
 	end
 
-	if killerName then
-		self._deathLabel.Text = "Killed by " .. killerName
+	if deathInfo.KillerName then
+		self._deathLabel.Text = "Killed by " .. deathInfo.KillerName
 	else
 		self._deathLabel.Text = "Hit the wall!"
+	end
+
+	if self._statsLabel then
+		self._statsLabel.Text = "Max Size: " .. deathInfo.MaxSegments .. "  |  Kills: " .. deathInfo.Kills
 	end
 
 	self._deathFrame.Visible = true
@@ -396,6 +625,109 @@ end
 function WormUIController:_hideDeathScreen()
 	if self._deathFrame then
 		self._deathFrame.Visible = false
+	end
+end
+
+function WormUIController:_showFinalScoreboard(results: { any })
+	-- Hide death screen first
+	self:_hideDeathScreen()
+
+	if not self._finalScoreboardFrame or not self._scoreboardList or not self._scoreboardWinner then
+		return
+	end
+
+	-- Set winner
+	if #results > 0 then
+		self._scoreboardWinner.Text = results[1].Name .. " wins!"
+	else
+		self._scoreboardWinner.Text = ""
+	end
+
+	-- Clear old entries
+	for _, child in self._scoreboardList:GetChildren() do
+		if child:IsA("Frame") then
+			child:Destroy()
+		end
+	end
+
+	-- Populate list
+	for i, entry in results do
+		local row = Instance.new("Frame")
+		row.Name = "Row" .. i
+		row.Size = UDim2.new(1, 0, 0, 28)
+		row.LayoutOrder = i
+		row.BorderSizePixel = 0
+		row.BackgroundTransparency = if i % 2 == 0 then 0.7 else 0.8
+		row.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+		row.Parent = self._scoreboardList
+
+		local isLocalPlayer = entry.Name == LocalPlayer.Name
+		local nameColor = if isLocalPlayer
+			then Color3.fromRGB(100, 255, 100)
+			elseif i == 1 then Color3.fromRGB(255, 220, 50)
+			else Color3.new(1, 1, 1)
+
+		createTextLabel({
+			Name = "Place",
+			Text = "#" .. entry.Placement,
+			Size = UDim2.new(0, 40, 1, 0),
+			Position = UDim2.fromOffset(5, 0),
+			TextSize = 14,
+			TextColor3 = nameColor,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+		createTextLabel({
+			Name = "Name",
+			Text = entry.Name,
+			Size = UDim2.new(0, 200, 1, 0),
+			Position = UDim2.fromOffset(50, 0),
+			TextSize = 14,
+			TextColor3 = nameColor,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = row,
+		})
+		createTextLabel({
+			Name = "Kills",
+			Text = tostring(entry.Kills),
+			Size = UDim2.new(0, 80, 1, 0),
+			Position = UDim2.fromOffset(270, 0),
+			TextSize = 14,
+			Parent = row,
+		})
+		createTextLabel({
+			Name = "MaxSize",
+			Text = tostring(entry.MaxSegments),
+			Size = UDim2.new(0, 100, 1, 0),
+			Position = UDim2.fromOffset(370, 0),
+			TextSize = 14,
+			Parent = row,
+		})
+	end
+
+	-- Update canvas size
+	self._scoreboardList.CanvasSize = UDim2.new(0, 0, 0, #results * 30)
+
+	self._finalScoreboardFrame.Visible = true
+end
+
+function WormUIController:_hideFinalScoreboard()
+	if self._finalScoreboardFrame then
+		self._finalScoreboardFrame.Visible = false
+	end
+end
+
+function WormUIController:_showCountdown(seconds: number)
+	if not self._countdownFrame or not self._countdownLabel then
+		return
+	end
+	self._countdownLabel.Text = "Next round in: " .. seconds
+	self._countdownFrame.Visible = true
+end
+
+function WormUIController:_hideCountdown()
+	if self._countdownFrame then
+		self._countdownFrame.Visible = false
 	end
 end
 
@@ -627,12 +959,16 @@ function WormUIController:KnitStart()
 		self:_updateSegmentCounter(segments)
 	end))
 
-	self._trove:Add(self._wormController.WormDied:Connect(function(killerName: string?)
-		self:_showDeathScreen(killerName)
-	end))
+	self._trove:Add(
+		self._wormController.WormDied:Connect(function(deathInfo: { KillerName: string?, MaxSegments: number, Kills: number })
+			self:_showDeathScreen(deathInfo)
+		end)
+	)
 
 	self._trove:Add(self._wormController.WormSpawned:Connect(function(_data: any)
 		self:_hideDeathScreen()
+		self:_hideFinalScoreboard()
+		self:_hideCountdown()
 		self:_updateSegmentCounter(WormConfig.InitialSegments)
 	end))
 
@@ -665,6 +1001,49 @@ function WormUIController:KnitStart()
 
 	-- Connect food signal (suppress Knit warning)
 	self._trove:Add(self._wormService.FoodSpawned:Connect(function(_position: Vector3, _color: Color3) end))
+
+	-- Suppress PlayerKillsUpdated Knit warning (handled by WormController)
+	self._trove:Add(self._wormService.PlayerKillsUpdated:Connect(function() end))
+
+	-- Wire spectate buttons
+	if self._spectateButtonPrev then
+		self._spectateButtonPrev.Activated:Connect(function()
+			if self._wormController then
+				self._wormController:CycleSpectate(-1)
+			end
+		end)
+	end
+	if self._spectateButtonNext then
+		self._spectateButtonNext.Activated:Connect(function()
+			if self._wormController then
+				self._wormController:CycleSpectate(1)
+			end
+		end)
+	end
+
+	-- Wire SpectateChanged to update label
+	self._trove:Add(self._wormController.SpectateChanged:Connect(function(name: string)
+		if self._spectateLabel then
+			self._spectateLabel.Text = name
+		end
+	end))
+
+	-- Round signals from WormController
+	self._trove:Add(self._wormController.RoundEnded:Connect(function(results: any)
+		self:_showFinalScoreboard(results)
+	end))
+
+	self._trove:Add(self._wormController.RoundCountdown:Connect(function(seconds: number)
+		self:_hideFinalScoreboard()
+		self:_hideDeathScreen()
+		self:_showCountdown(seconds)
+	end))
+
+	self._trove:Add(self._wormController.RoundStarted:Connect(function()
+		self:_hideDeathScreen()
+		self:_hideFinalScoreboard()
+		self:_hideCountdown()
+	end))
 
 	-- Periodic minimap + power-up timer updates
 	self._trove:Add(task.spawn(function()

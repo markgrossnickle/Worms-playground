@@ -14,6 +14,7 @@ type WormState = Enums.WormState
 type WormData = {
 	State: WormState,
 	Segments: number,
+	MaxSegments: number,
 	Direction: Vector3,
 	Boosting: boolean,
 	Color: Color3,
@@ -42,6 +43,7 @@ local WormService = Knit.CreateService({
 		WormDied = Knit.CreateSignal(),
 		WormAte = Knit.CreateSignal(),
 		FoodSpawned = Knit.CreateSignal(),
+		PlayerKillsUpdated = Knit.CreateSignal(),
 	},
 
 	_worms = {} :: { [Player]: WormData },
@@ -51,6 +53,7 @@ local WormService = Knit.CreateService({
 	_foodCount = 0,
 	_gameLoopConnection = nil :: RBXScriptConnection?,
 	_botModels = {} :: { [string]: { Model: Model, Segments: number } },
+	_roundActive = false,
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -403,6 +406,7 @@ function WormService:_spawnWorm(player: Player)
 
 	wormData.State = "Alive" :: WormState
 	wormData.Segments = WormConfig.InitialSegments
+	wormData.MaxSegments = WormConfig.InitialSegments
 	wormData.Direction = Vector3.new(0, 0, -1)
 	wormData.Boosting = false
 	wormData.Kills = 0
@@ -455,6 +459,7 @@ function WormService:_killWorm(player: Player, killer: Player?, killerBotName: s
 		local killerData = self._worms[killer]
 		if killerData then
 			killerData.Kills += 1
+			self.Client.PlayerKillsUpdated:Fire(killer, killerData.Kills)
 		end
 		self.PlayerKilled:Fire(killer, player)
 	end
@@ -479,12 +484,7 @@ function WormService:_killWorm(player: Player, killer: Player?, killerBotName: s
 		end
 	end
 
-	-- Respawn after delay
-	task.delay(WormConfig.RespawnDelay, function()
-		if player.Parent and self._worms[player] then
-			self:_spawnWorm(player)
-		end
-	end)
+	-- No auto-respawn; RoundService controls respawning
 end
 
 --------------------------------------------------
@@ -525,6 +525,9 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 				self._foodCount -= 1
 				local prevFloor = math.floor(wormData.Segments)
 				wormData.Segments += foodValue
+				if wormData.Segments > wormData.MaxSegments then
+					wormData.MaxSegments = wormData.Segments
+				end
 				local newFloor = math.floor(wormData.Segments)
 
 				-- Add new segment visuals for each whole segment gained
@@ -808,6 +811,9 @@ function WormService:AddSegments(ownerName: string, count: number)
 	for player, wormData in self._worms do
 		if player.Name == ownerName and wormData.State == "Alive" then
 			wormData.Segments += count
+			if wormData.Segments > wormData.MaxSegments then
+				wormData.MaxSegments = wormData.Segments
+			end
 			local character = player.Character
 			if character then
 				for i = math.floor(wormData.Segments - count) + 1, math.floor(wormData.Segments) do
@@ -826,6 +832,93 @@ function WormService:AddSegments(ownerName: string, count: number)
 	if botInfo then
 		botInfo.Segments += count
 	end
+end
+
+--------------------------------------------------
+-- Round API (called by RoundService)
+--------------------------------------------------
+
+function WormService:SetRoundActive(active: boolean)
+	self._roundActive = active
+end
+
+function WormService:GetAliveCount(): number
+	local count = 0
+	for _, wormData in self._worms do
+		if wormData.State == "Alive" then
+			count += 1
+		end
+	end
+	return count
+end
+
+function WormService:GetAlivePlayers(): { Player }
+	local alive = {}
+	for player, wormData in self._worms do
+		if wormData.State == "Alive" then
+			table.insert(alive, player)
+		end
+	end
+	return alive
+end
+
+function WormService:GetRoundStats(): { [string]: { Kills: number, MaxSegments: number } }
+	local stats = {}
+	for player, wormData in self._worms do
+		stats[player.Name] = {
+			Kills = wormData.Kills,
+			MaxSegments = math.floor(wormData.MaxSegments),
+		}
+	end
+	return stats
+end
+
+function WormService:SpawnWormForRound(player: Player)
+	local wormData = self._worms[player]
+	if not wormData then
+		return
+	end
+	self:_spawnWorm(player)
+end
+
+function WormService:KillAllWorms()
+	for player, wormData in self._worms do
+		if wormData.State == "Alive" then
+			-- Clear active power-up
+			PowerUpService:ClearActivePowerUp(player.Name)
+			wormData.State = "Dead" :: WormState
+			self:_updateLeaderstats(player, 0)
+
+			local character = player.Character
+			if character then
+				local segFolder = character:FindFirstChild("WormSegments")
+				if segFolder then
+					segFolder:Destroy()
+				end
+				local wormHead = character:FindFirstChild("WormHead")
+				if wormHead then
+					wormHead:Destroy()
+				end
+				local humanoid = character:FindFirstChild("Humanoid") :: Humanoid?
+				if humanoid then
+					humanoid.Health = 0
+				end
+			end
+		end
+	end
+end
+
+function WormService:ResetFood()
+	local foodFolder = self._foodFolder :: Folder
+	for _, food in foodFolder:GetChildren() do
+		food:Destroy()
+	end
+	self._foodCount = 0
+	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)
+end
+
+function WormService:GetWormData_Server(player: Player): WormData?
+	return self._worms[player]
 end
 
 --------------------------------------------------
@@ -907,6 +1000,7 @@ local function newWormData(color: Color3): WormData
 	return {
 		State = "Dead" :: WormState,
 		Segments = WormConfig.InitialSegments,
+		MaxSegments = WormConfig.InitialSegments,
 		Direction = Vector3.new(0, 0, -1),
 		Boosting = false,
 		Color = color,
@@ -954,7 +1048,12 @@ function WormService:KnitStart()
 			end
 		end)
 
-		self:_spawnWorm(player)
+		-- Gate spawn: only spawn if a round is active; otherwise set to Spectating
+		if self._roundActive then
+			-- Late joiner during round — spectate
+			self._worms[player].State = "Spectating"
+		end
+		-- RoundService controls initial spawning
 	end)
 
 	-- Handle players leaving
@@ -1006,7 +1105,7 @@ function WormService:KnitStart()
 				end
 			end)
 
-			self:_spawnWorm(player)
+			-- RoundService controls spawning
 		end)
 	end
 
