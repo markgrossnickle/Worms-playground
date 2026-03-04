@@ -60,6 +60,7 @@ local WormService = Knit.CreateService({
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
+	PlayerDied = Signal.new(), -- Fires for ALL player deaths (name, killerName?)
 	PlayerScoreChanged = Signal.new(),
 })
 
@@ -324,12 +325,12 @@ function WormService:_setupCharacter(player: Player, character: Model)
 	end
 end
 
-function WormService:_createSegment(character: Model, player: Player, index: number, color: Color3): Part
+function WormService:_createSegment(character: Model, player: Player, index: number, color: Color3): Part?
 	local wormData = self._worms[player]
 	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
 	if not hrp or not segFolder then
-		error("Cannot create segment: missing HumanoidRootPart or WormSegments folder")
+		return nil
 	end
 
 	local seg = Instance.new("Part")
@@ -469,6 +470,7 @@ function WormService:_killWorm(player: Player, killer: Player?, killerBotName: s
 
 	local killerDisplayName = if killer then killer.Name elseif killerBotName then killerBotName else nil
 	self.Client.WormDied:FireAll(player.Name, killerDisplayName)
+	self.PlayerDied:Fire(player, killerDisplayName)
 
 	-- Clean up character visuals
 	local character = player.Character

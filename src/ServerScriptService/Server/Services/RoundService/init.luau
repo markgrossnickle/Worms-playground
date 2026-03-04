@@ -57,9 +57,14 @@ function RoundService:_startRound()
 	-- Clear bot stats from previous round
 	BotService:ClearRoundStats()
 
-	-- Spawn all current players
+	-- Spawn all current players (pcall so one failure doesn't block bot spawning)
 	for _, player in Players:GetPlayers() do
-		WormService:SpawnWormForRound(player)
+		local ok, err = pcall(function()
+			WormService:SpawnWormForRound(player)
+		end)
+		if not ok then
+			warn("[RoundService] Failed to spawn worm for " .. player.Name .. ": " .. tostring(err))
+		end
 	end
 
 	-- Spawn bots to fill
@@ -74,7 +79,7 @@ end
 
 function RoundService:_startPollWinCondition()
 	if self._pollConnection then
-		self._pollConnection:Disconnect()
+		task.cancel(self._pollConnection)
 		self._pollConnection = nil
 	end
 
@@ -213,35 +218,18 @@ function RoundService:KnitStart()
 	PowerUpService = require(script.Parent.PowerUpService)
 	CoinService = require(script.Parent.CoinService)
 
-	-- Track player eliminations
-	WormService.PlayerKilled:Connect(function(_killer: Player, victim: Player)
-		local wormData = WormService:GetWormData_Server(victim)
-		self:_recordElimination(
-			victim.Name,
-			false,
-			if wormData then wormData.Kills else 0,
-			if wormData then math.floor(wormData.MaxSegments) else 0
-		)
-	end)
-
-	-- Track player deaths from non-player causes (walls, zone)
-	-- WormDied fires for all deaths; PlayerKilled only fires for player-kills-player
-	-- We listen to WormDied on the client signal to catch wall/zone deaths
-	WormService.Client.WormDied:Connect(function(deadName: string, _killerName: string?)
-		-- Check if this was a player (not bot — bots go through BotKilled)
-		local deadPlayer = Players:FindFirstChild(deadName) :: Player?
-		if not deadPlayer then
-			return
-		end
+	-- Track ALL player deaths (walls, zone, and player-kills-player)
+	-- PlayerDied fires server-side for every player death
+	WormService.PlayerDied:Connect(function(deadPlayer: Player, _killerName: string?)
 		-- Avoid double-recording: check if already in elimination order
 		for _, entry in self._eliminationOrder do
-			if entry.Name == deadName then
+			if entry.Name == deadPlayer.Name then
 				return
 			end
 		end
 		local wormData = WormService:GetWormData_Server(deadPlayer)
 		self:_recordElimination(
-			deadName,
+			deadPlayer.Name,
 			false,
 			if wormData then wormData.Kills else 0,
 			if wormData then math.floor(wormData.MaxSegments) else 0
