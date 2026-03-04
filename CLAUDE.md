@@ -169,6 +169,54 @@ end
 
 Inside a `Client` method, `self.Server` refers back to the root service table — use it to delegate to internal service logic. From the service root, `self.Client` refers to the Client table — use it to fire signals or set properties for clients.
 
+## Promise Handling (IMPORTANT)
+
+Knit service methods called from the client return **Promises**, not direct values. You MUST handle them.
+
+### Rules
+- **Always await or chain** service method return values: use `:andThen()`, `:await()`, or `:expect()`
+- **Never assign a Promise to a variable** expecting a plain value (e.g., `local data = Service:GetData()` is WRONG — use `local ok, data = Service:GetData():await()`)
+- **Fire-and-forget** is acceptable ONLY for void methods (signals, events). If the method returns data or can fail, handle the promise
+- **Chain `:catch()`** with `:andThen()` to handle errors — never silently drop promise rejections
+- **Wrap in `task.spawn()`** when calling promise-returning methods inside event connections where you don't want to block
+
+### Correct Patterns
+```lua
+-- Blocking await (returns success, value)
+local ok, data = MyService:GetData():await()
+
+-- Promise chaining
+MyService:DoThing():andThen(function(result)
+    -- handle result
+end):catch(function(err)
+    warn("Failed:", err)
+end)
+
+-- Synchronous extraction (throws on failure)
+local profile = PlayerDataService:WaitForProfile(player):expect()
+
+-- Fire-and-forget in event connection (wrap in task.spawn)
+Players.PlayerAdded:Connect(function(player)
+    task.spawn(function()
+        PlayerDataService:WaitForProfile(player)
+            :andThen(function() --[[ ... ]] end)
+            :catch(function(err) warn(err) end)
+    end)
+end)
+```
+
+### Anti-Patterns (DO NOT DO)
+```lua
+-- BAD: Assigns Promise object to variable instead of awaited value
+local modes = TeamService:GetGameModes()
+
+-- BAD: Ignores returned Promise from method that can fail
+PlayerBadgeService:AwardBadge(player, badgeName)
+
+-- BAD: No error handling on chain
+MyService:RiskyOperation():andThen(function() end)  -- missing :catch()
+```
+
 ## Startup Flow
 
 1. **Server:** `Main.server.luau` → `Server:Main()` → `Knit.AddServices()` → `Knit:Start()` → load server components → load shared components → set `ServerStatus = "Started"`
