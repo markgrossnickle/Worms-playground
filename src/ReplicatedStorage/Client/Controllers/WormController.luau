@@ -56,6 +56,10 @@ local WormController = Knit.CreateController({
 	-- Per-round stat tracking
 	_peakSegments = WormConfig.InitialSegments,
 	_kills = 0,
+
+	-- Ghost mode state
+	_inGhostMode = false,
+	GhostModeChanged = Signal.new(),
 })
 
 --------------------------------------------------
@@ -312,7 +316,7 @@ function WormController:_onRenderStep()
 		end
 
 		self:_updateCamera()
-	elseif self._spectateTargetModel then
+	elseif not self._inGhostMode and self._spectateTargetModel then
 		self:_updateSpectateCamera()
 	end
 end
@@ -325,6 +329,9 @@ function WormController:_connectServerSignals()
 	self._trove:Add(
 		self._wormService.WormSpawned:Connect(
 			function(data: { Segments: number, Color: { number }, Position: { number } })
+				if self._inGhostMode then
+					self:_exitGhostMode()
+				end
 				self._alive = true
 				self._segments = data.Segments
 				self._peakSegments = data.Segments
@@ -368,12 +375,44 @@ function WormController:_connectServerSignals()
 			if ownerName == LocalPlayer.Name then
 				self.PowerUpActivated:Fire(powerUpType, duration)
 			end
+			-- Ghost semi-transparent visual for any worm
+			if powerUpType == "GHOST" then
+				self:_setWormTransparency(ownerName, 0.6)
+			end
+			-- Speed Burst trail effect
+			if powerUpType == "SPEED_BURST" and ownerName == LocalPlayer.Name then
+				self:_addSpeedBurstTrail()
+			end
 		end)
 	)
 
-	self._trove:Add(self._powerUpService.PowerUpExpired:Connect(function(ownerName: string, _powerUpType: string)
+	self._trove:Add(self._powerUpService.PowerUpExpired:Connect(function(ownerName: string, powerUpType: string)
 		if ownerName == LocalPlayer.Name then
 			self.PowerUpExpired:Fire()
+		end
+		-- Restore transparency when ghost expires
+		if powerUpType == "GHOST" then
+			self:_setWormTransparency(ownerName, 0)
+		end
+		-- Remove speed burst trail
+		if powerUpType == "SPEED_BURST" and ownerName == LocalPlayer.Name then
+			self:_removeSpeedBurstTrail()
+		end
+	end))
+
+	-- Ghost mode signals
+	self._trove:Add(self._wormService.GhostSpawned:Connect(function(_spawnPos: Vector3)
+		self:_enterGhostMode()
+	end))
+
+	self._trove:Add(self._wormService.GhostDespawned:Connect(function()
+		if self._inGhostMode then
+			self:_exitGhostMode()
+			-- If still dead, auto-spectate
+			if not self._alive then
+				self:_setupCamera()
+				self:_autoSpectate()
+			end
 		end
 	end))
 
@@ -416,6 +455,133 @@ function WormController:_connectServerSignals()
 		self:_setupCamera()
 		self:_autoSpectate()
 	end))
+end
+
+--------------------------------------------------
+-- Visual effects
+--------------------------------------------------
+
+function WormController:_setWormTransparency(ownerName: string, transparency: number)
+	-- Find the model (player character or bot model)
+	local model: Model? = nil
+	for _, player in Players:GetPlayers() do
+		if player.Name == ownerName and player.Character then
+			model = player.Character
+			break
+		end
+	end
+	if not model then
+		model = workspace:FindFirstChild(ownerName) :: Model?
+	end
+	if not model then
+		return
+	end
+
+	local wormHead = model:FindFirstChild("WormHead") :: BasePart?
+	if wormHead then
+		wormHead.Transparency = transparency
+	end
+	local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+	if segFolder then
+		for _, seg in segFolder:GetChildren() do
+			if seg:IsA("BasePart") then
+				seg.Transparency = transparency
+			end
+		end
+	end
+end
+
+function WormController:_addSpeedBurstTrail()
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+	if not wormHead then
+		return
+	end
+	-- Remove existing trail if any
+	local existing = wormHead:FindFirstChild("SpeedBurstTrail")
+	if existing then
+		existing:Destroy()
+	end
+
+	local attachment0 = Instance.new("Attachment")
+	attachment0.Name = "TrailA0"
+	attachment0.Position = Vector3.new(0, 0, -1)
+	attachment0.Parent = wormHead
+
+	local attachment1 = Instance.new("Attachment")
+	attachment1.Name = "TrailA1"
+	attachment1.Position = Vector3.new(0, 0, 1)
+	attachment1.Parent = wormHead
+
+	local trail = Instance.new("Trail")
+	trail.Name = "SpeedBurstTrail"
+	trail.Attachment0 = attachment0
+	trail.Attachment1 = attachment1
+	trail.Color = ColorSequence.new(Color3.fromRGB(255, 140, 0), Color3.fromRGB(255, 60, 0))
+	trail.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1) })
+	trail.Lifetime = 0.5
+	trail.MinLength = 0.1
+	trail.WidthScale = NumberSequence.new(1)
+	trail.LightEmission = 0.5
+	trail.Parent = wormHead
+end
+
+function WormController:ToggleGhostMode()
+	if self._alive then
+		return -- Can't ghost while alive
+	end
+	self._wormService:ToggleGhost()
+end
+
+function WormController:_enterGhostMode()
+	self._inGhostMode = true
+	self._spectateTarget = nil
+	self._spectateTargetModel = nil
+
+	-- Switch to first-person camera
+	Camera.CameraType = Enum.CameraType.Custom
+	Camera.CameraSubject = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+
+	-- Force first person
+	LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+
+	self.GhostModeChanged:Fire(true)
+end
+
+function WormController:_exitGhostMode()
+	self._inGhostMode = false
+
+	-- Restore camera
+	LocalPlayer.CameraMode = Enum.CameraMode.Classic
+	Camera.CameraType = Enum.CameraType.Scriptable
+
+	self.GhostModeChanged:Fire(false)
+end
+
+function WormController:_removeSpeedBurstTrail()
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+	if not wormHead then
+		return
+	end
+	local trail = wormHead:FindFirstChild("SpeedBurstTrail")
+	if trail then
+		trail:Destroy()
+	end
+	local a0 = wormHead:FindFirstChild("TrailA0")
+	if a0 then
+		a0:Destroy()
+	end
+	local a1 = wormHead:FindFirstChild("TrailA1")
+	if a1 then
+		a1:Destroy()
+	end
 end
 
 --------------------------------------------------

@@ -44,6 +44,8 @@ local WormService = Knit.CreateService({
 		WormAte = Knit.CreateSignal(),
 		FoodSpawned = Knit.CreateSignal(),
 		PlayerKillsUpdated = Knit.CreateSignal(),
+		GhostSpawned = Knit.CreateSignal(),
+		GhostDespawned = Knit.CreateSignal(),
 	},
 
 	_worms = {} :: { [Player]: WormData },
@@ -54,6 +56,7 @@ local WormService = Knit.CreateService({
 	_gameLoopConnection = nil :: RBXScriptConnection?,
 	_botModels = {} :: { [string]: { Model: Model, Segments: number } },
 	_roundActive = false,
+	_ghosts = {} :: { [Player]: Model },
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -685,9 +688,10 @@ function WormService:_updateMovement(player: Player, dt: number)
 
 	-- Handle boosting and power-up speed (larger worms move slower)
 	local sizeScale = 1 / (1 + wormData.Segments * WormConfig.SpeedScaleFactor)
-	local speed = WormConfig.BaseSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(player.Name)
+	local slowFactor = PowerUpService:GetSlowFactor(player.Name)
+	local speed = WormConfig.BaseSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(player.Name) * slowFactor
 	if wormData.Boosting and wormData.Segments > WormConfig.MinBoostSegments then
-		speed = WormConfig.BoostSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(player.Name)
+		speed = WormConfig.BoostSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(player.Name) * slowFactor
 		local prevFloor = math.floor(wormData.Segments)
 		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
 		wormData.Segments = math.max(WormConfig.MinBoostSegments, wormData.Segments - segmentsToLose)
@@ -835,6 +839,140 @@ function WormService:AddSegments(ownerName: string, count: number)
 end
 
 --------------------------------------------------
+-- Ghost mode (dead player first-person)
+--------------------------------------------------
+
+function WormService:SpawnGhost(player: Player)
+	-- Remove existing ghost if any
+	self:DespawnGhost(player)
+
+	local wormData = self._worms[player]
+	if not wormData or wormData.State == "Alive" then
+		return
+	end
+
+	-- Pick a spawn position near center of arena
+	local spawnPos = Vector3.new(math.random(-50, 50), 0, math.random(-50, 50))
+
+	-- Create a tiny character model (1/3 scale)
+	local ghost = Instance.new("Model")
+	ghost.Name = player.Name .. "_Ghost"
+
+	local hrp = Instance.new("Part")
+	hrp.Name = "HumanoidRootPart"
+	hrp.Size = Vector3.new(0.67, 0.67, 0.67) -- 1/3 of normal 2x2x2
+	hrp.Transparency = 0.5
+	hrp.Anchored = false
+	hrp.CanCollide = true
+	hrp.Position = spawnPos + Vector3.new(0, 2, 0)
+	hrp.Parent = ghost
+	ghost.PrimaryPart = hrp
+
+	-- Ghost body (small humanoid)
+	local humanoid = Instance.new("Humanoid")
+	humanoid.WalkSpeed = 24
+	humanoid.JumpPower = 30
+	humanoid.MaxHealth = math.huge
+	humanoid.Health = math.huge
+	humanoid.Parent = ghost
+
+	-- Ghost head (small sphere)
+	local head = Instance.new("Part")
+	head.Name = "Head"
+	head.Shape = Enum.PartType.Ball
+	head.Size = Vector3.new(0.5, 0.5, 0.5)
+	head.Color = Color3.fromRGB(180, 200, 255)
+	head.Material = Enum.Material.Neon
+	head.Transparency = 0.4
+	head.CanCollide = false
+	head.Position = hrp.Position + Vector3.new(0, 0.6, 0)
+	head.Parent = ghost
+
+	local headWeld = Instance.new("Weld")
+	headWeld.Part0 = hrp
+	headWeld.Part1 = head
+	headWeld.C0 = CFrame.new(0, 0.6, 0)
+	headWeld.Parent = head
+
+	-- Ghost torso
+	local torso = Instance.new("Part")
+	torso.Name = "Torso"
+	torso.Size = Vector3.new(0.5, 0.67, 0.33)
+	torso.Color = Color3.fromRGB(150, 170, 220)
+	torso.Material = Enum.Material.Neon
+	torso.Transparency = 0.4
+	torso.CanCollide = false
+	torso.Position = hrp.Position
+	torso.Parent = ghost
+
+	local torsoWeld = Instance.new("Weld")
+	torsoWeld.Part0 = hrp
+	torsoWeld.Part1 = torso
+	torsoWeld.C0 = CFrame.new(0, 0, 0)
+	torsoWeld.Parent = torso
+
+	-- Name label above ghost
+	local billboard = Instance.new("BillboardGui")
+	billboard.Size = UDim2.new(0, 80, 0, 20)
+	billboard.StudsOffset = Vector3.new(0, 1.5, 0)
+	billboard.AlwaysOnTop = false
+	billboard.Parent = head
+
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Size = UDim2.fromScale(1, 1)
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Text = player.Name
+	nameLabel.TextColor3 = Color3.fromRGB(180, 200, 255)
+	nameLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	nameLabel.TextStrokeTransparency = 0.5
+	nameLabel.Font = Enum.Font.GothamBold
+	nameLabel.TextScaled = true
+	nameLabel.Parent = billboard
+
+	-- Set collision group so ghosts don't collide with worms or food
+	-- We use CanCollide on individual parts instead since collision groups require PhysicsService setup
+	-- Ghost HRP collides with ground/walls (CanCollide = true)
+	-- Other parts don't collide
+
+	ghost.Parent = workspace
+
+	-- Set player's character to the ghost so they can control it
+	player.Character = ghost
+
+	self._ghosts[player] = ghost
+
+	-- Notify client
+	self.Client.GhostSpawned:Fire(player, spawnPos)
+end
+
+function WormService:DespawnGhost(player: Player)
+	local ghost = self._ghosts[player]
+	if ghost then
+		ghost:Destroy()
+		self._ghosts[player] = nil
+		self.Client.GhostDespawned:Fire(player)
+	end
+end
+
+function WormService:DespawnAllGhosts()
+	for player, ghost in self._ghosts do
+		ghost:Destroy()
+		self.Client.GhostDespawned:Fire(player)
+	end
+	self._ghosts = {}
+end
+
+-- Client method to request ghost spawn/despawn
+function WormService.Client:ToggleGhost(player: Player)
+	local ghost = self.Server._ghosts[player]
+	if ghost then
+		self.Server:DespawnGhost(player)
+	else
+		self.Server:SpawnGhost(player)
+	end
+end
+
+--------------------------------------------------
 -- Round API (called by RoundService)
 --------------------------------------------------
 
@@ -878,10 +1016,14 @@ function WormService:SpawnWormForRound(player: Player)
 	if not wormData then
 		return
 	end
+	-- Remove ghost if player was in ghost mode
+	self:DespawnGhost(player)
 	self:_spawnWorm(player)
 end
 
 function WormService:KillAllWorms()
+	-- Despawn all ghosts first
+	self:DespawnAllGhosts()
 	for player, wormData in self._worms do
 		if wormData.State == "Alive" then
 			-- Clear active power-up
@@ -1063,7 +1205,8 @@ function WormService:KnitStart()
 			self:_dropFoodFromWorm(player, math.floor(wormData.Segments * 0.5))
 		end
 
-		-- Clear active power-ups for the leaving player
+		-- Clear ghost and power-ups for the leaving player
+		self:DespawnGhost(player)
 		PowerUpService:ClearActivePowerUp(player.Name)
 
 		self._worms[player] = nil

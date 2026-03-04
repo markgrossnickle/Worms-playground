@@ -8,6 +8,8 @@ export type PlayerData = {
 	Coins: number,
 	XP: number,
 	Level: number,
+	LastLoginDate: string,
+	LoginStreak: number,
 	Milestones: {
 		FirstJoin: boolean,
 		FirstWin: boolean,
@@ -21,6 +23,8 @@ local playerDataTemplate: PlayerData = {
 	Coins = 0,
 	XP = 0,
 	Level = 1,
+	LastLoginDate = "",
+	LoginStreak = 0,
 	Milestones = {
 		FirstJoin = false,
 		FirstWin = false,

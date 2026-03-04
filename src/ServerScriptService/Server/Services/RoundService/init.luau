@@ -10,6 +10,10 @@ local WormService -- Set in KnitStart
 local BotService -- Set in KnitStart
 local ShrinkZoneService -- Set in KnitStart
 local PowerUpService -- Set in KnitStart
+local CoinService -- Set in KnitStart
+
+local PLACEMENT_REWARDS = { [1] = 100, [2] = 60, [3] = 40, [4] = 25 }
+local DEFAULT_REWARD = 10
 
 type EliminationEntry = {
 	Name: string,
@@ -144,11 +148,26 @@ function RoundService:_endRound()
 			Placement = entry.Placement,
 			Kills = entry.Kills,
 			MaxSegments = entry.MaxSegments,
+			CoinsAwarded = 0,
 		})
 	end
 	table.sort(results, function(a, b)
 		return a.Placement < b.Placement
 	end)
+
+	-- Award coins based on placement
+	for _, entry in results do
+		if not entry.IsBot then
+			local player = Players:FindFirstChild(entry.Name) :: Player?
+			if player then
+				local reward = PLACEMENT_REWARDS[entry.Placement] or DEFAULT_REWARD
+				entry.CoinsAwarded = reward
+				task.spawn(function()
+					CoinService:AwardCoins(player, reward)
+				end)
+			end
+		end
+	end
 
 	-- Fire round ended to all clients
 	self.Client.RoundEnded:FireAll(results)
@@ -192,11 +211,17 @@ function RoundService:KnitStart()
 	BotService = require(script.Parent.BotService)
 	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
 	PowerUpService = require(script.Parent.PowerUpService)
+	CoinService = require(script.Parent.CoinService)
 
 	-- Track player eliminations
-	WormService.PlayerKilled:Connect(function(killer: Player, victim: Player)
+	WormService.PlayerKilled:Connect(function(_killer: Player, victim: Player)
 		local wormData = WormService:GetWormData_Server(victim)
-		self:_recordElimination(victim.Name, false, if wormData then wormData.Kills else 0, if wormData then math.floor(wormData.MaxSegments) else 0)
+		self:_recordElimination(
+			victim.Name,
+			false,
+			if wormData then wormData.Kills else 0,
+			if wormData then math.floor(wormData.MaxSegments) else 0
+		)
 	end)
 
 	-- Track player deaths from non-player causes (walls, zone)
@@ -239,12 +264,7 @@ function RoundService:KnitStart()
 		local wormData = WormService:GetWormData_Server(player)
 		if wormData and wormData.State == "Alive" then
 			-- Record elimination as if they died
-			self:_recordElimination(
-				player.Name,
-				false,
-				wormData.Kills,
-				math.floor(wormData.MaxSegments)
-			)
+			self:_recordElimination(player.Name, false, wormData.Kills, math.floor(wormData.MaxSegments))
 		end
 	end)
 

@@ -42,9 +42,11 @@ return {
 	PowerUpTypes = {
 		SPEED = { Duration = 3, SpeedMultiplier = 2 },
 		MAGNET = { Duration = 10, Range = 25 },
-		GHOST = { Duration = 3 },
+		SPEED_BURST = { Duration = 3, SpeedMultiplier = 3 },
+		GHOST = { Duration = 5 },
 		SHIELD = { Duration = 0 }, -- one-time save, no duration
 		SIZE_BOMB = { Duration = 0, SegmentsAdded = 5 }, -- instant effect
+		FREEZE_RING = { Duration = 4, Range = 15, SlowFactor = 0.5 },
 	},
 
 	-- Rounds

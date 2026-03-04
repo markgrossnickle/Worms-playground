@@ -17,10 +17,12 @@ local MAX_KILL_FEED = 5
 
 local POWERUP_COLORS = {
 	SPEED = Color3.fromRGB(0, 200, 255),
+	SPEED_BURST = Color3.fromRGB(255, 140, 0),
 	MAGNET = Color3.fromRGB(255, 0, 200),
 	GHOST = Color3.fromRGB(200, 200, 255),
 	SHIELD = Color3.fromRGB(255, 220, 0),
 	SIZE_BOMB = Color3.fromRGB(255, 80, 0),
+	FREEZE_RING = Color3.fromRGB(100, 180, 255),
 }
 
 local WormUIController = Knit.CreateController({
@@ -46,6 +48,9 @@ local WormUIController = Knit.CreateController({
 	_currentZoneRadius = WormConfig.ArenaSize / 2,
 	_activePowerUpEnd = 0,
 
+	-- Ghost mode toggle
+	_ghostToggleBtn = nil :: TextButton?,
+
 	-- Round UI elements
 	_statsLabel = nil :: TextLabel?,
 	_spectateSection = nil :: Frame?,
@@ -57,6 +62,10 @@ local WormUIController = Knit.CreateController({
 	_scoreboardWinner = nil :: TextLabel?,
 	_countdownFrame = nil :: Frame?,
 	_countdownLabel = nil :: TextLabel?,
+
+	-- Coin display
+	_coinLabel = nil :: TextLabel?,
+	_coinService = nil :: any,
 })
 
 --------------------------------------------------
@@ -117,6 +126,7 @@ function WormUIController:_buildUI()
 	self:_buildZoneWarning(gui)
 	self:_buildFinalScoreboard(gui)
 	self:_buildCountdownOverlay(gui)
+	self:_buildCoinDisplay(gui)
 end
 
 function WormUIController:_buildSegmentCounter(parent: ScreenGui)
@@ -263,6 +273,26 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 	local nextCorner = Instance.new("UICorner")
 	nextCorner.CornerRadius = UDim.new(0, 6)
 	nextCorner.Parent = nextBtn
+
+	-- Ghost mode toggle button
+	local ghostBtn = Instance.new("TextButton")
+	ghostBtn.Name = "GhostToggle"
+	ghostBtn.Size = UDim2.new(0, 180, 0, 36)
+	ghostBtn.Position = UDim2.fromScale(0.5, 0.72)
+	ghostBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+	ghostBtn.BackgroundColor3 = Color3.fromRGB(80, 100, 160)
+	ghostBtn.BackgroundTransparency = 0.2
+	ghostBtn.BorderSizePixel = 0
+	ghostBtn.Text = "Enter Ghost Mode"
+	ghostBtn.TextColor3 = Color3.fromRGB(180, 200, 255)
+	ghostBtn.TextSize = 16
+	ghostBtn.Font = Enum.Font.GothamBold
+	ghostBtn.Parent = frame
+	self._ghostToggleBtn = ghostBtn
+
+	local ghostCorner = Instance.new("UICorner")
+	ghostCorner.CornerRadius = UDim.new(0, 8)
+	ghostCorner.Parent = ghostBtn
 end
 
 function WormUIController:_buildKillFeed(parent: ScreenGui)
@@ -497,7 +527,7 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	-- Header row
 	local headerFrame = Instance.new("Frame")
 	headerFrame.Name = "Header"
-	headerFrame.Size = UDim2.new(0, 500, 0, 30)
+	headerFrame.Size = UDim2.new(0, 540, 0, 30)
 	headerFrame.Position = UDim2.fromScale(0.5, 0.26)
 	headerFrame.AnchorPoint = Vector2.new(0.5, 0)
 	headerFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
@@ -542,17 +572,26 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	createTextLabel({
 		Name = "H4",
 		Text = "Max Size",
-		Size = UDim2.new(0, 100, 1, 0),
-		Position = UDim2.fromOffset(370, 0),
+		Size = UDim2.new(0, 80, 1, 0),
+		Position = UDim2.fromOffset(360, 0),
 		TextSize = 14,
 		TextColor3 = Color3.fromRGB(180, 180, 180),
+		Parent = headerFrame,
+	})
+	createTextLabel({
+		Name = "H5",
+		Text = "Coins",
+		Size = UDim2.new(0, 70, 1, 0),
+		Position = UDim2.fromOffset(450, 0),
+		TextSize = 14,
+		TextColor3 = Color3.fromRGB(255, 220, 50),
 		Parent = headerFrame,
 	})
 
 	-- Scrolling list container
 	local scrollFrame = Instance.new("ScrollingFrame")
 	scrollFrame.Name = "List"
-	scrollFrame.Size = UDim2.new(0, 500, 0, 300)
+	scrollFrame.Size = UDim2.new(0, 540, 0, 300)
 	scrollFrame.Position = UDim2.fromScale(0.5, 0.3)
 	scrollFrame.AnchorPoint = Vector2.new(0.5, 0)
 	scrollFrame.BackgroundTransparency = 1
@@ -567,6 +606,48 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	listLayout.Padding = UDim.new(0, 2)
 	listLayout.Parent = scrollFrame
+end
+
+function WormUIController:_buildCoinDisplay(parent: ScreenGui)
+	local frame = Instance.new("Frame")
+	frame.Name = "CoinDisplay"
+	frame.Size = UDim2.new(0, 140, 0, 40)
+	frame.Position = UDim2.new(1, -10, 0, 10)
+	frame.AnchorPoint = Vector2.new(1, 0)
+	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	frame.BackgroundTransparency = 0.5
+	frame.BorderSizePixel = 0
+	frame.Parent = parent
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = frame
+
+	-- Coin icon (gold circle)
+	local icon = Instance.new("Frame")
+	icon.Name = "CoinIcon"
+	icon.Size = UDim2.new(0, 24, 0, 24)
+	icon.Position = UDim2.new(0, 8, 0.5, 0)
+	icon.AnchorPoint = Vector2.new(0, 0.5)
+	icon.BackgroundColor3 = Color3.fromRGB(255, 200, 50)
+	icon.BorderSizePixel = 0
+	icon.Parent = frame
+
+	local iconCorner = Instance.new("UICorner")
+	iconCorner.CornerRadius = UDim.new(1, 0)
+	iconCorner.Parent = icon
+
+	self._coinLabel = createTextLabel({
+		Name = "CoinCount",
+		Text = "0",
+		Size = UDim2.new(0, 90, 1, 0),
+		Position = UDim2.fromOffset(40, 0),
+		TextSize = 20,
+		TextColor3 = Color3.fromRGB(255, 220, 50),
+		Font = Enum.Font.GothamBold,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = frame,
+	})
 end
 
 function WormUIController:_buildCountdownOverlay(parent: ScreenGui)
@@ -698,9 +779,22 @@ function WormUIController:_showFinalScoreboard(results: { any })
 		createTextLabel({
 			Name = "MaxSize",
 			Text = tostring(entry.MaxSegments),
-			Size = UDim2.new(0, 100, 1, 0),
-			Position = UDim2.fromOffset(370, 0),
+			Size = UDim2.new(0, 80, 1, 0),
+			Position = UDim2.fromOffset(360, 0),
 			TextSize = 14,
+			Parent = row,
+		})
+
+		local coinsText = if entry.CoinsAwarded and entry.CoinsAwarded > 0
+			then "+" .. tostring(entry.CoinsAwarded)
+			else ""
+		createTextLabel({
+			Name = "Coins",
+			Text = coinsText,
+			Size = UDim2.new(0, 70, 1, 0),
+			Position = UDim2.fromOffset(450, 0),
+			TextSize = 14,
+			TextColor3 = Color3.fromRGB(255, 220, 50),
 			Parent = row,
 		})
 	end
@@ -951,6 +1045,7 @@ function WormUIController:KnitStart()
 	self._wormService = Knit.GetService("WormService")
 	self._wormController = Knit.GetController("WormController")
 	self._powerUpService = Knit.GetService("PowerUpService")
+	self._coinService = Knit.GetService("CoinService")
 
 	self:_buildUI()
 
@@ -960,9 +1055,11 @@ function WormUIController:KnitStart()
 	end))
 
 	self._trove:Add(
-		self._wormController.WormDied:Connect(function(deathInfo: { KillerName: string?, MaxSegments: number, Kills: number })
-			self:_showDeathScreen(deathInfo)
-		end)
+		self._wormController.WormDied:Connect(
+			function(deathInfo: { KillerName: string?, MaxSegments: number, Kills: number })
+				self:_showDeathScreen(deathInfo)
+			end
+		)
 	)
 
 	self._trove:Add(self._wormController.WormSpawned:Connect(function(_data: any)
@@ -1021,6 +1118,33 @@ function WormUIController:KnitStart()
 		end)
 	end
 
+	-- Wire ghost toggle button
+	if self._ghostToggleBtn then
+		self._ghostToggleBtn.Activated:Connect(function()
+			if self._wormController then
+				self._wormController:ToggleGhostMode()
+			end
+		end)
+	end
+
+	-- Ghost mode changed signal — toggle death screen visibility and button text
+	self._trove:Add(self._wormController.GhostModeChanged:Connect(function(inGhost: boolean)
+		if inGhost then
+			-- Hide death overlay while in ghost mode (player is in first person)
+			if self._deathFrame then
+				self._deathFrame.Visible = false
+			end
+		else
+			-- Show death screen again when exiting ghost mode
+			if self._deathFrame then
+				self._deathFrame.Visible = true
+			end
+		end
+		if self._ghostToggleBtn then
+			self._ghostToggleBtn.Text = if inGhost then "Exit Ghost Mode" else "Enter Ghost Mode"
+		end
+	end))
+
 	-- Wire SpectateChanged to update label
 	self._trove:Add(self._wormController.SpectateChanged:Connect(function(name: string)
 		if self._spectateLabel then
@@ -1043,6 +1167,31 @@ function WormUIController:KnitStart()
 		self:_hideDeathScreen()
 		self:_hideFinalScoreboard()
 		self:_hideCountdown()
+	end))
+
+	-- Coin display: initial value + change signal
+	task.spawn(function()
+		local ok, coins = self._coinService:GetCoins():await()
+		if ok and self._coinLabel then
+			self._coinLabel.Text = tostring(coins)
+		end
+	end)
+
+	self._trove:Add(self._coinService.CoinsChanged:Connect(function(newCoins: number)
+		if self._coinLabel then
+			self._coinLabel.Text = tostring(newCoins)
+		end
+	end))
+
+	-- Daily reward notification
+	self._trove:Add(self._coinService.DailyReward:Connect(function(coins: number, streak: number, isBonus: boolean)
+		local msg = "Daily reward: +" .. coins .. " coins!"
+		if isBonus then
+			msg = msg .. " 7-day streak bonus: +200 coins!"
+		elseif streak > 1 then
+			msg = msg .. " (Day " .. streak .. " streak)"
+		end
+		self:_showZoneWarning(msg)
 	end))
 
 	-- Periodic minimap + power-up timer updates

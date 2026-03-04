@@ -9,13 +9,15 @@ local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local WormService -- Set in KnitStart
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
-local POWERUP_TYPES = { "SPEED", "MAGNET", "GHOST", "SHIELD", "SIZE_BOMB" }
+local POWERUP_TYPES = { "SPEED", "SPEED_BURST", "MAGNET", "GHOST", "SHIELD", "SIZE_BOMB", "FREEZE_RING" }
 local POWERUP_COLORS = {
 	SPEED = Color3.fromRGB(0, 200, 255),
+	SPEED_BURST = Color3.fromRGB(255, 140, 0),
 	MAGNET = Color3.fromRGB(255, 0, 200),
 	GHOST = Color3.fromRGB(200, 200, 255),
 	SHIELD = Color3.fromRGB(255, 220, 0),
 	SIZE_BOMB = Color3.fromRGB(255, 80, 0),
+	FREEZE_RING = Color3.fromRGB(100, 180, 255),
 }
 
 type PowerUpInstance = {
@@ -46,6 +48,9 @@ local PowerUpService = Knit.CreateService({
 
 	-- Active power-ups per player name (player name or bot name)
 	_activePowerUps = {} :: { [string]: ActivePowerUp },
+
+	-- Freeze Ring slow debuffs: { [targetName] = { EndTime, Factor } }
+	_slowDebuffs = {} :: { [string]: { EndTime: number, Factor: number } },
 })
 
 --------------------------------------------------
@@ -167,6 +172,12 @@ function PowerUpService:_applyPowerUp(ownerName: string, powerUpType: string)
 		return
 	end
 
+	-- FREEZE_RING is instant area effect
+	if powerUpType == "FREEZE_RING" then
+		self:_applyFreezeRing(ownerName)
+		return
+	end
+
 	-- SHIELD has no timer but stays until consumed
 	local duration = config.Duration or 0
 	if powerUpType == "SHIELD" then
@@ -193,6 +204,124 @@ function PowerUpService:_applySizeBomb(ownerName: string)
 	-- Find the worm (player or bot) and add segments
 	WormService:AddSegments(ownerName, segmentsToAdd)
 	self.Client.PowerUpActivated:FireAll(ownerName, "SIZE_BOMB", 0)
+end
+
+function PowerUpService:_applyFreezeRing(ownerName: string)
+	local freezeConfig = WormConfig.PowerUpTypes.FREEZE_RING
+	local range = freezeConfig.Range
+	local slowFactor = freezeConfig.SlowFactor
+	local duration = freezeConfig.Duration
+
+	-- Find owner's head position
+	local ownerPos = self:_getHeadPosition(ownerName)
+	if not ownerPos then
+		return
+	end
+
+	-- Apply slow debuff to all nearby worms (not the owner)
+	local now = os.clock()
+	local endTime = now + duration
+
+	-- Check all players
+	for playerName, pos in self:_getAllHeadPositions() do
+		if playerName ~= ownerName then
+			local dist = (pos - ownerPos).Magnitude
+			if dist <= range then
+				self._slowDebuffs[playerName] = { EndTime = endTime, Factor = slowFactor }
+			end
+		end
+	end
+
+	-- Create expanding blue ring visual
+	task.spawn(function()
+		local ring = Instance.new("Part")
+		ring.Name = "FreezeRing"
+		ring.Shape = Enum.PartType.Cylinder
+		ring.Anchored = true
+		ring.CanCollide = false
+		ring.Material = Enum.Material.Neon
+		ring.Color = Color3.fromRGB(100, 180, 255)
+		ring.Transparency = 0.5
+		ring.Size = Vector3.new(0.5, 1, 1)
+		ring.CFrame = CFrame.new(ownerPos) * CFrame.Angles(0, 0, math.rad(90))
+		ring.Parent = workspace
+
+		local expandTime = 0.5
+		local elapsed = 0
+		while elapsed < expandTime do
+			elapsed += task.wait()
+			local t = math.min(elapsed / expandTime, 1)
+			local diameter = range * 2 * t
+			ring.Size = Vector3.new(0.5, diameter, diameter)
+			ring.Transparency = 0.5 + 0.5 * t
+		end
+
+		ring:Destroy()
+	end)
+
+	self.Client.PowerUpActivated:FireAll(ownerName, "FREEZE_RING", 0)
+end
+
+function PowerUpService:_getHeadPosition(name: string): Vector3?
+	-- Check players
+	local Players = game:GetService("Players")
+	for _, player in Players:GetPlayers() do
+		if player.Name == name then
+			local character = player.Character
+			if character then
+				local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+				if hrp then
+					return hrp.Position
+				end
+			end
+			return nil
+		end
+	end
+	-- Check bots
+	local botModel = workspace:FindFirstChild(name) :: Model?
+	if botModel and botModel:IsA("Model") then
+		local hrp = botModel:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if hrp then
+			return hrp.Position
+		end
+	end
+	return nil
+end
+
+function PowerUpService:_getAllHeadPositions(): { [string]: Vector3 }
+	local positions = {}
+	local Players = game:GetService("Players")
+	for _, player in Players:GetPlayers() do
+		local character = player.Character
+		if character then
+			local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+			if hrp then
+				positions[player.Name] = hrp.Position
+			end
+		end
+	end
+	-- Bots (registered in WormService._botModels, but we can scan workspace)
+	for _, child in workspace:GetChildren() do
+		if child:IsA("Model") and child:FindFirstChild("WormHead") and not positions[child.Name] then
+			local hrp = child:FindFirstChild("HumanoidRootPart") :: BasePart?
+			if hrp then
+				positions[child.Name] = hrp.Position
+			end
+		end
+	end
+	return positions
+end
+
+function PowerUpService:GetSlowFactor(ownerName: string): number
+	local debuff = self._slowDebuffs[ownerName]
+	if not debuff then
+		return 1
+	end
+	if os.clock() >= debuff.EndTime then
+		self._slowDebuffs[ownerName] = nil
+		return 1
+	end
+	return debuff.Factor
 end
 
 function PowerUpService:CollectPowerUp(ownerName: string, headPos: Vector3): boolean
@@ -234,6 +363,9 @@ end
 function PowerUpService:GetSpeedMultiplier(ownerName: string): number
 	if self:HasActivePowerUp(ownerName, "SPEED") then
 		return WormConfig.PowerUpTypes.SPEED.SpeedMultiplier
+	end
+	if self:HasActivePowerUp(ownerName, "SPEED_BURST") then
+		return WormConfig.PowerUpTypes.SPEED_BURST.SpeedMultiplier
 	end
 	return 1
 end
@@ -284,6 +416,7 @@ function PowerUpService:Reset()
 		self.Client.PowerUpExpired:FireAll(ownerName, active.Type)
 	end
 	self._activePowerUps = {}
+	self._slowDebuffs = {}
 	self._nextSpawnTime = os.clock() + 5
 end
 
