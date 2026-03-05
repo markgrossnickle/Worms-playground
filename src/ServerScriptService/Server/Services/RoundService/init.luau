@@ -256,12 +256,15 @@ function RoundService:KnitStart()
 		end
 	end)
 
-	-- Handle late joiners during a round
+	-- Handle late joiners during a round — spawn as ghost immediately
 	Players.PlayerAdded:Connect(function(player: Player)
 		if self._roundActive then
-			-- Small delay for client to set up
-			task.wait(1)
-			self.Client.ForceSpectate:Fire(player)
+			-- Wait for WormService to register the player and client to set up
+			task.wait(2)
+			if not self._roundActive then
+				return
+			end
+			WormService:SpawnGhost(player)
 		end
 	end)
 

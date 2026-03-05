@@ -952,7 +952,7 @@ function WormController:KnitStart()
 	self:_setupGhostInput()
 	self:_connectServerSignals()
 
-	-- Catch up: server may have spawned our worm before client connected signals
+	-- Catch up: server may have spawned our worm or ghost before client connected signals
 	local ok, data = pcall(function()
 		return self._wormService:GetWormData()
 	end)
@@ -961,6 +961,14 @@ function WormController:KnitStart()
 		self._segments = data.Segments
 		self:_setupCamera()
 		self.WormSpawned:Fire(data)
+	end
+
+	-- Catch up: check if we're already a ghost (late joiner spawned as ghost)
+	local ghostOk, isGhost = pcall(function()
+		return self._wormService:IsGhost()
+	end)
+	if ghostOk and isGhost and not self._inGhostMode then
+		self:_enterGhostMode()
 	end
 
 	self._trove:Add(RunService.RenderStepped:Connect(function()

@@ -1126,6 +1126,10 @@ function WormService.Client:GetWormData(player: Player): { Segments: number, Sta
 	return { Segments = math.floor(wormData.Segments), State = wormData.State }
 end
 
+function WormService.Client:IsGhost(player: Player): boolean
+	return self.Server._ghosts[player] ~= nil
+end
+
 --------------------------------------------------
 -- Knit lifecycle
 --------------------------------------------------
