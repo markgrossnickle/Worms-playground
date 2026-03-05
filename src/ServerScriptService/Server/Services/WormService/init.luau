@@ -15,7 +15,8 @@ type WormData = {
 	State: WormState,
 	Segments: number,
 	MaxSegments: number,
-	Direction: Vector3,
+	Direction: Vector3, -- Target direction (set by client input)
+	CurrentDirection: Vector3, -- Actual facing direction (interpolated toward Direction)
 	Boosting: boolean,
 	Color: Color3,
 	Kills: number,
@@ -58,6 +59,7 @@ local WormService = Knit.CreateService({
 	_botModels = {} :: { [string]: { Model: Model, Segments: number } },
 	_roundActive = false,
 	_ghosts = {} :: { [Player]: Model },
+	_batchSpawning = false, -- Suppress FoodSpawned signal during bulk food creation
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -125,6 +127,19 @@ function WormService:_createArena()
 		wall.Transparency = 0.5
 		wall.Parent = workspace
 	end
+
+	-- Configure lighting to remove reflections and default environment effects
+	local Lighting = game:GetService("Lighting")
+	Lighting.EnvironmentDiffuseScale = 0
+	Lighting.EnvironmentSpecularScale = 0
+	Lighting.GlobalShadows = true
+	Lighting.Brightness = 2
+	Lighting.ClockTime = 14
+	Lighting.Technology = Enum.Technology.ShadowMap
+	-- Remove any default children (Sky, Atmosphere, Bloom, etc.)
+	for _, child in Lighting:GetChildren() do
+		child:Destroy()
+	end
 end
 
 local function pickFoodTier()
@@ -163,13 +178,17 @@ function WormService:_spawnFood()
 	food.Parent = self._foodFolder
 
 	self._foodCount += 1
-	self.Client.FoodSpawned:FireAll(food.Position, food.Color)
+	if not self._batchSpawning then
+		self.Client.FoodSpawned:FireAll(food.Position, food.Color)
+	end
 end
 
 function WormService:_spawnFoodBatch(count: number)
+	self._batchSpawning = true
 	for _ = 1, count do
 		self:_spawnFood()
 	end
+	self._batchSpawning = false
 end
 
 function WormService:_collectSegmentPositions(model: Model): { Vector3 }
@@ -413,6 +432,7 @@ function WormService:_spawnWorm(player: Player)
 	wormData.Segments = WormConfig.InitialSegments
 	wormData.MaxSegments = WormConfig.InitialSegments
 	wormData.Direction = Vector3.new(0, 0, -1)
+	wormData.CurrentDirection = Vector3.new(0, 0, -1)
 	wormData.Boosting = false
 	wormData.Kills = 0
 
@@ -795,8 +815,26 @@ function WormService:_updateMovement(player: Player, dt: number)
 		end
 	end
 
+	-- Interpolate current direction toward target direction with turn rate
+	local targetDir = wormData.Direction
+	local currentDir = wormData.CurrentDirection
+	local currentAngle = math.atan2(currentDir.X, currentDir.Z)
+	local targetAngle = math.atan2(targetDir.X, targetDir.Z)
+	local angleDiff = targetAngle - currentAngle
+	-- Normalize to [-pi, pi]
+	while angleDiff > math.pi do
+		angleDiff -= 2 * math.pi
+	end
+	while angleDiff < -math.pi do
+		angleDiff += 2 * math.pi
+	end
+	local maxTurn = WormConfig.TurnRate * dt
+	local actualTurn = math.clamp(angleDiff, -maxTurn, maxTurn)
+	local newAngle = currentAngle + actualTurn
+	local dir = Vector3.new(math.sin(newAngle), 0, math.cos(newAngle))
+	wormData.CurrentDirection = dir
+
 	-- Move HRP in direction (anchored, so CFrame set is authoritative)
-	local dir = wormData.Direction
 	local move = dir * speed * dt
 	local newPos = hrp.Position + move
 	newPos = Vector3.new(newPos.X, 1, newPos.Z) -- Keep on ground
@@ -1241,6 +1279,7 @@ local function newWormData(color: Color3): WormData
 		Segments = WormConfig.InitialSegments,
 		MaxSegments = WormConfig.InitialSegments,
 		Direction = Vector3.new(0, 0, -1),
+		CurrentDirection = Vector3.new(0, 0, -1),
 		Boosting = false,
 		Color = color,
 		Kills = 0,

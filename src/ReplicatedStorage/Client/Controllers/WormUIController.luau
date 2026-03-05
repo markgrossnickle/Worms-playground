@@ -67,6 +67,15 @@ local WormUIController = Knit.CreateController({
 	-- Coin display
 	_coinLabel = nil :: TextLabel?,
 	_coinService = nil :: any,
+
+	-- Ghost toolbar
+	_toolbarFrame = nil :: Frame?,
+	_grappleSlot = nil :: Frame?,
+	_grappleHint = nil :: TextLabel?,
+	_weaponSlotLabel = nil :: TextLabel?,
+	_weaponSlotAmmo = nil :: TextLabel?,
+	_weaponController = nil :: any,
+	_maxAmmo = 0,
 })
 
 --------------------------------------------------
@@ -129,6 +138,7 @@ function WormUIController:_buildUI()
 	self:_buildCountdownOverlay(gui)
 	self:_buildCoinDisplay(gui)
 	self:_buildCrosshair(gui)
+	self:_buildToolbar(gui)
 end
 
 function WormUIController:_buildSegmentCounter(parent: ScreenGui)
@@ -699,6 +709,155 @@ function WormUIController:_buildCrosshair(parent: ScreenGui)
 	dotCorner.Parent = dot
 end
 
+function WormUIController:_buildToolbar(parent: ScreenGui)
+	-- Container bar at bottom center
+	local toolbar = Instance.new("Frame")
+	toolbar.Name = "GhostToolbar"
+	toolbar.Size = UDim2.new(0, 400, 0, 60)
+	toolbar.Position = UDim2.new(0.5, 0, 1, -10)
+	toolbar.AnchorPoint = Vector2.new(0.5, 1)
+	toolbar.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	toolbar.BackgroundTransparency = 0.4
+	toolbar.BorderSizePixel = 0
+	toolbar.Visible = false
+	toolbar.Parent = parent
+	self._toolbarFrame = toolbar
+
+	local toolbarCorner = Instance.new("UICorner")
+	toolbarCorner.CornerRadius = UDim.new(0, 10)
+	toolbarCorner.Parent = toolbar
+
+	local toolbarStroke = Instance.new("UIStroke")
+	toolbarStroke.Color = Color3.fromRGB(80, 80, 80)
+	toolbarStroke.Thickness = 1
+	toolbarStroke.Parent = toolbar
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Horizontal
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.Padding = UDim.new(0, 8)
+	layout.Parent = toolbar
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingLeft = UDim.new(0, 8)
+	padding.PaddingRight = UDim.new(0, 8)
+	padding.Parent = toolbar
+
+	-- Slot 1: Grapple
+	local grappleSlot = self:_buildToolbarSlot(toolbar, "1", "GRAPPLE", "LMB to hook", Color3.fromRGB(0, 180, 255))
+	self._grappleSlot = grappleSlot.Frame
+	self._grappleHint = grappleSlot.Hint
+
+	-- Divider
+	local divider = Instance.new("Frame")
+	divider.Name = "Divider"
+	divider.Size = UDim2.new(0, 1, 0.6, 0)
+	divider.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+	divider.BorderSizePixel = 0
+	divider.LayoutOrder = 2
+	divider.Parent = toolbar
+
+	-- Slot 2: Weapon
+	local weaponSlot = self:_buildToolbarSlot(toolbar, "2", "---", "LMB to fire", Color3.fromRGB(255, 200, 50))
+	weaponSlot.Frame.LayoutOrder = 3
+	self._weaponSlotLabel = weaponSlot.Label
+	self._weaponSlotAmmo = weaponSlot.Ammo
+end
+
+function WormUIController:_buildToolbarSlot(
+	parent: Frame,
+	keyHint: string,
+	toolName: string,
+	actionHint: string,
+	accentColor: Color3
+): { Frame: Frame, Label: TextLabel, Hint: TextLabel, Ammo: TextLabel }
+	local slot = Instance.new("Frame")
+	slot.Name = "Slot" .. keyHint
+	slot.Size = UDim2.new(0, 180, 0, 50)
+	slot.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	slot.BackgroundTransparency = 0.3
+	slot.BorderSizePixel = 0
+	slot.LayoutOrder = tonumber(keyHint) or 1
+	slot.Parent = parent
+
+	local slotCorner = Instance.new("UICorner")
+	slotCorner.CornerRadius = UDim.new(0, 6)
+	slotCorner.Parent = slot
+
+	-- Key badge (small square with number)
+	local badge = Instance.new("Frame")
+	badge.Name = "Badge"
+	badge.Size = UDim2.new(0, 20, 0, 20)
+	badge.Position = UDim2.new(0, 6, 0, 6)
+	badge.BackgroundColor3 = accentColor
+	badge.BackgroundTransparency = 0.3
+	badge.BorderSizePixel = 0
+	badge.Parent = slot
+
+	local badgeCorner = Instance.new("UICorner")
+	badgeCorner.CornerRadius = UDim.new(0, 4)
+	badgeCorner.Parent = badge
+
+	local badgeLabel = Instance.new("TextLabel")
+	badgeLabel.Name = "Key"
+	badgeLabel.Size = UDim2.fromScale(1, 1)
+	badgeLabel.BackgroundTransparency = 1
+	badgeLabel.Text = keyHint
+	badgeLabel.TextColor3 = Color3.new(1, 1, 1)
+	badgeLabel.TextSize = 12
+	badgeLabel.Font = Enum.Font.GothamBold
+	badgeLabel.Parent = badge
+
+	-- Tool name label
+	local nameLabel = createTextLabel({
+		Name = "ToolName",
+		Text = toolName,
+		Size = UDim2.new(0, 120, 0, 20),
+		Position = UDim2.new(0, 32, 0, 4),
+		TextSize = 16,
+		TextColor3 = accentColor,
+		Font = Enum.Font.GothamBold,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = slot,
+	})
+
+	-- Ammo label (right side, for weapon slot)
+	local ammoLabel = createTextLabel({
+		Name = "Ammo",
+		Text = "",
+		Size = UDim2.new(0, 40, 0, 20),
+		Position = UDim2.new(1, -8, 0, 4),
+		AnchorPoint = Vector2.new(1, 0),
+		TextSize = 14,
+		TextColor3 = Color3.fromRGB(200, 200, 200),
+		Font = Enum.Font.GothamBold,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = slot,
+	})
+
+	-- Action hint (bottom row)
+	local hintLabel = createTextLabel({
+		Name = "Hint",
+		Text = actionHint,
+		Size = UDim2.new(1, -12, 0, 16),
+		Position = UDim2.new(0, 6, 1, -4),
+		AnchorPoint = Vector2.new(0, 1),
+		TextSize = 11,
+		TextColor3 = Color3.fromRGB(140, 140, 140),
+		Font = Enum.Font.Gotham,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = slot,
+	})
+
+	return {
+		Frame = slot,
+		Label = nameLabel,
+		Hint = hintLabel,
+		Ammo = ammoLabel,
+	}
+end
+
 function WormUIController:_buildCountdownOverlay(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "CountdownOverlay"
@@ -1093,6 +1252,7 @@ end
 function WormUIController:KnitStart()
 	self._wormService = Knit.GetService("WormService")
 	self._wormController = Knit.GetController("WormController")
+	self._weaponController = Knit.GetController("WeaponController")
 	self._powerUpService = Knit.GetService("PowerUpService")
 	self._coinService = Knit.GetService("CoinService")
 
@@ -1176,7 +1336,7 @@ function WormUIController:KnitStart()
 		end)
 	end
 
-	-- Ghost mode changed signal — toggle death screen visibility, button text, and crosshair
+	-- Ghost mode changed signal — toggle death screen visibility, button text, crosshair, and mouse cursor
 	self._trove:Add(self._wormController.GhostModeChanged:Connect(function(inGhost: boolean)
 		if inGhost then
 			-- Hide death overlay while in ghost mode (player is in first person)
@@ -1195,6 +1355,54 @@ function WormUIController:KnitStart()
 		if self._crosshairFrame then
 			self._crosshairFrame.Visible = inGhost
 		end
+		if self._toolbarFrame then
+			self._toolbarFrame.Visible = inGhost
+		end
+		-- Hide mouse cursor when crosshair is active, restore when it's gone
+		UserInputService.MouseIconEnabled = not inGhost
+		-- Reset weapon slot when leaving ghost mode
+		if not inGhost then
+			if self._weaponSlotLabel then
+				self._weaponSlotLabel.Text = "---"
+			end
+			if self._weaponSlotAmmo then
+				self._weaponSlotAmmo.Text = ""
+			end
+			if self._grappleHint then
+				self._grappleHint.Text = "LMB to hook"
+			end
+		end
+	end))
+
+	-- Wire weapon toolbar signals
+	self._trove:Add(self._weaponController.WeaponAssigned:Connect(function(weaponType: string, ammo: number)
+		if self._weaponSlotLabel then
+			self._weaponSlotLabel.Text = string.upper(weaponType)
+		end
+		self._maxAmmo = ammo
+		if self._weaponSlotAmmo then
+			self._weaponSlotAmmo.Text = tostring(ammo) .. "/" .. tostring(ammo)
+		end
+		-- Update grapple hint: with weapon, grapple is only available when not riding
+		if self._grappleHint then
+			self._grappleHint.Text = "LMB to hook"
+		end
+	end))
+
+	self._trove:Add(self._weaponController.AmmoChanged:Connect(function(ammo: number)
+		if self._weaponSlotAmmo then
+			self._weaponSlotAmmo.Text = tostring(ammo) .. "/" .. tostring(self._maxAmmo)
+		end
+	end))
+
+	self._trove:Add(self._weaponController.WeaponCleared:Connect(function()
+		if self._weaponSlotLabel then
+			self._weaponSlotLabel.Text = "---"
+		end
+		if self._weaponSlotAmmo then
+			self._weaponSlotAmmo.Text = ""
+		end
+		self._maxAmmo = 0
 	end))
 
 	-- Wire SpectateChanged to update label

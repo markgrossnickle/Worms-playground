@@ -2,13 +2,14 @@
 
 return {
 	-- Arena
-	ArenaSize = 2000,
+	ArenaSize = 1200,
 
 	-- Movement
 	BaseSpeed = 30,
 	BoostSpeed = 60,
 	BoostSegmentCostPerSec = 0.5,
 	MinBoostSegments = 5,
+	TurnRate = 4, -- radians per second (~230 deg/sec)
 
 	-- Segments
 	SegmentSpacing = 1.5,
@@ -16,7 +17,7 @@ return {
 	InitialSegments = 3,
 
 	-- Food
-	MaxFoodOnMap = 800,
+	MaxFoodOnMap = 400,
 	FoodValue = 1,
 	FoodTiers = {
 		{ Weight = 60, Size = 1.2, Value = 1 },

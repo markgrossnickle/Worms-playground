@@ -62,6 +62,10 @@ function WeaponController:TryShoot()
 	if not self._wormController._inGhostMode then
 		return
 	end
+	-- Don't shoot while grapple is pulling toward a worm
+	if self._wormController._grappleState == "PULLING" then
+		return
+	end
 
 	-- Client-side fire rate check
 	local weaponDef = WeaponConfig.Weapons[self._weaponType]

@@ -821,7 +821,12 @@ function WormController:_onGhostClick()
 	end
 
 	if self._grappleState == "RIDING" then
-		-- Detach
+		-- If a weapon is equipped, left-click shoots — use Space to detach instead
+		local WeaponController = Knit.GetController("WeaponController")
+		if WeaponController and WeaponController:GetWeaponType() then
+			return -- Let WeaponController handle the click for shooting
+		end
+		-- No weapon: detach on click
 		self:_detachGrapple()
 		return
 	end
