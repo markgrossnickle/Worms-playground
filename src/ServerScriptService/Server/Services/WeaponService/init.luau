@@ -170,7 +170,18 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 				local targetWormData = WormService:GetWormData_Server(hitPlayer)
 				if targetWormData and targetWormData.State == "Alive" then
 					hitPlayerName = hitPlayer.Name
-					WormService:DamageWorm(hitPlayer, weaponDef.Damage, player, dir * weaponDef.Knockback)
+					-- Extract which segment was hit for hit-point damage
+					local hitSegmentIndex: number? = nil
+					if string.sub(hitPart.Name, 1, 7) == "Segment" then
+						hitSegmentIndex = tonumber(string.sub(hitPart.Name, 8))
+					end
+					WormService:DamageWorm(
+						hitPlayer,
+						weaponDef.Damage,
+						player,
+						dir * weaponDef.Knockback,
+						hitSegmentIndex
+					)
 					self.Client.HitConfirmed:Fire(player, hitPlayer.Name, weaponDef.Damage)
 					self.WeaponHit:Fire(player, hitPlayer, weaponDef.Damage)
 				end

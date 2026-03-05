@@ -70,10 +70,12 @@ local WormUIController = Knit.CreateController({
 
 	-- Ghost toolbar
 	_toolbarFrame = nil :: Frame?,
-	_grappleSlot = nil :: Frame?,
+	_grappleSlot = nil :: TextButton?,
 	_grappleHint = nil :: TextLabel?,
+	_grappleSlotStroke = nil :: UIStroke?,
 	_weaponSlotLabel = nil :: TextLabel?,
 	_weaponSlotAmmo = nil :: TextLabel?,
+	_weaponSlotStroke = nil :: UIStroke?,
 	_weaponController = nil :: any,
 	_maxAmmo = 0,
 })
@@ -748,6 +750,9 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	local grappleSlot = self:_buildToolbarSlot(toolbar, "1", "GRAPPLE", "LMB to hook", Color3.fromRGB(0, 180, 255))
 	self._grappleSlot = grappleSlot.Frame
 	self._grappleHint = grappleSlot.Hint
+	self._grappleSlotStroke = grappleSlot.Stroke
+	-- Grapple starts selected
+	self._grappleSlotStroke.Transparency = 0
 
 	-- Divider
 	local divider = Instance.new("Frame")
@@ -763,6 +768,19 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	weaponSlot.Frame.LayoutOrder = 3
 	self._weaponSlotLabel = weaponSlot.Label
 	self._weaponSlotAmmo = weaponSlot.Ammo
+	self._weaponSlotStroke = weaponSlot.Stroke
+
+	-- Click handlers for cross-platform slot switching (TextButton.Activated works on desktop + mobile)
+	grappleSlot.Frame.Activated:Connect(function()
+		if self._wormController then
+			self._wormController:SetSelectedSlot(1)
+		end
+	end)
+	weaponSlot.Frame.Activated:Connect(function()
+		if self._wormController then
+			self._wormController:SetSelectedSlot(2)
+		end
+	end)
 end
 
 function WormUIController:_buildToolbarSlot(
@@ -771,19 +789,34 @@ function WormUIController:_buildToolbarSlot(
 	toolName: string,
 	actionHint: string,
 	accentColor: Color3
-): { Frame: Frame, Label: TextLabel, Hint: TextLabel, Ammo: TextLabel }
-	local slot = Instance.new("Frame")
+): {
+	Frame: TextButton,
+	Label: TextLabel,
+	Hint: TextLabel,
+	Ammo: TextLabel,
+	Stroke: UIStroke,
+}
+	local slot = Instance.new("TextButton")
 	slot.Name = "Slot" .. keyHint
 	slot.Size = UDim2.new(0, 180, 0, 50)
 	slot.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 	slot.BackgroundTransparency = 0.3
 	slot.BorderSizePixel = 0
 	slot.LayoutOrder = tonumber(keyHint) or 1
+	slot.Text = ""
+	slot.AutoButtonColor = false
 	slot.Parent = parent
 
 	local slotCorner = Instance.new("UICorner")
 	slotCorner.CornerRadius = UDim.new(0, 6)
 	slotCorner.Parent = slot
+
+	-- Selection highlight stroke
+	local slotStroke = Instance.new("UIStroke")
+	slotStroke.Color = accentColor
+	slotStroke.Thickness = 2
+	slotStroke.Transparency = 1 -- hidden by default
+	slotStroke.Parent = slot
 
 	-- Key badge (small square with number)
 	local badge = Instance.new("Frame")
@@ -855,6 +888,7 @@ function WormUIController:_buildToolbarSlot(
 		Label = nameLabel,
 		Hint = hintLabel,
 		Ammo = ammoLabel,
+		Stroke = slotStroke,
 	}
 end
 
@@ -1375,6 +1409,13 @@ function WormUIController:KnitStart()
 			if self._grappleHint then
 				self._grappleHint.Text = "LMB to hook"
 			end
+			-- Reset slot highlight
+			if self._grappleSlotStroke then
+				self._grappleSlotStroke.Transparency = 0
+			end
+			if self._weaponSlotStroke then
+				self._weaponSlotStroke.Transparency = 1
+			end
 		end
 	end))
 
@@ -1407,6 +1448,20 @@ function WormUIController:KnitStart()
 			self._weaponSlotAmmo.Text = ""
 		end
 		self._maxAmmo = 0
+	end))
+
+	-- Wire slot selection highlight
+	self._trove:Add(self._wormController.SelectedSlotChanged:Connect(function(slot: number)
+		if self._grappleSlotStroke then
+			self._grappleSlotStroke.Transparency = if slot == 1 then 0 else 1
+		end
+		if self._weaponSlotStroke then
+			self._weaponSlotStroke.Transparency = if slot == 2 then 0 else 1
+		end
+		-- Update hint text
+		if self._grappleHint then
+			self._grappleHint.Text = if slot == 1 then "LMB to hook" else "Press [1]"
+		end
 	end))
 
 	-- Wire SpectateChanged to update label

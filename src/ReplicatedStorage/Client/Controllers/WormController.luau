@@ -73,6 +73,10 @@ local WormController = Knit.CreateController({
 	_grapplePullDuration = 0.3,
 	_grapplePullStartPos = nil :: Vector3?,
 	_rideWeld = nil :: WeldConstraint?,
+
+	-- Tool slot selection (ghost mode)
+	_selectedSlot = 1 :: number, -- 1 = Grapple, 2 = Weapon
+	SelectedSlotChanged = Signal.new(), -- (slotNumber)
 })
 
 --------------------------------------------------
@@ -563,6 +567,10 @@ function WormController:_enterGhostMode()
 	self._spectateTarget = nil
 	self._spectateTargetModel = nil
 
+	-- Reset tool selection to grapple
+	self._selectedSlot = 1
+	self.SelectedSlotChanged:Fire(1)
+
 	-- Switch to first-person camera
 	Camera.CameraType = Enum.CameraType.Custom
 	Camera.CameraSubject = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
@@ -820,13 +828,12 @@ function WormController:_onGhostClick()
 		return
 	end
 
+	-- Only handle grapple actions when Grapple slot (1) is selected
+	if self._selectedSlot ~= 1 then
+		return
+	end
+
 	if self._grappleState == "RIDING" then
-		-- If a weapon is equipped, left-click shoots — use Space to detach instead
-		local WeaponController = Knit.GetController("WeaponController")
-		if WeaponController and WeaponController:GetWeaponType() then
-			return -- Let WeaponController handle the click for shooting
-		end
-		-- No weapon: detach on click
 		self:_detachGrapple()
 		return
 	end
@@ -888,6 +895,10 @@ function WormController:_setupGhostInput()
 			self:_onGhostClick()
 		elseif input.KeyCode == Enum.KeyCode.Space then
 			self:_onGhostSpace()
+		elseif input.KeyCode == Enum.KeyCode.One then
+			self:SetSelectedSlot(1)
+		elseif input.KeyCode == Enum.KeyCode.Two then
+			self:SetSelectedSlot(2)
 		end
 	end)
 end
@@ -936,6 +947,21 @@ function WormController:SetBoosting(boosting: boolean)
 	if self._wormService then
 		self._wormService:SetBoosting(boosting)
 	end
+end
+
+function WormController:SetSelectedSlot(slot: number)
+	if slot ~= 1 and slot ~= 2 then
+		return
+	end
+	if slot == self._selectedSlot then
+		return
+	end
+	self._selectedSlot = slot
+	self.SelectedSlotChanged:Fire(slot)
+end
+
+function WormController:GetSelectedSlot(): number
+	return self._selectedSlot
 end
 
 --------------------------------------------------

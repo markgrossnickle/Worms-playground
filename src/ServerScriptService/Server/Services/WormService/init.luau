@@ -517,7 +517,13 @@ end
 -- Weapon damage (called by WeaponService)
 --------------------------------------------------
 
-function WormService:DamageWorm(player: Player, segmentsToRemove: number, attacker: Player?, knockbackImpulse: Vector3?)
+function WormService:DamageWorm(
+	player: Player,
+	segmentsToRemove: number,
+	attacker: Player?,
+	knockbackImpulse: Vector3?,
+	hitSegmentIndex: number?
+)
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
 		return
@@ -528,44 +534,70 @@ function WormService:DamageWorm(player: Player, segmentsToRemove: number, attack
 		return
 	end
 
+	local currentFloor = math.floor(wormData.Segments)
+	local actualRemoved = math.min(segmentsToRemove, currentFloor)
+	if actualRemoved <= 0 then
+		return
+	end
+
+	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+
+	-- Determine removal range
+	local removeStart: number
+	local removeEnd: number
+	if hitSegmentIndex and hitSegmentIndex >= 1 and hitSegmentIndex <= currentFloor then
+		-- Hit-point removal: remove segments starting at the hit index
+		removeStart = hitSegmentIndex
+		removeEnd = math.min(hitSegmentIndex + actualRemoved - 1, currentFloor)
+		actualRemoved = removeEnd - removeStart + 1
+	else
+		-- Tail removal (collisions, shrink zone, boost, etc.)
+		removeEnd = currentFloor
+		removeStart = currentFloor - actualRemoved + 1
+	end
+
 	-- Drop food from removed segments
-	local actualRemoved = math.min(segmentsToRemove, math.floor(wormData.Segments))
-	if actualRemoved > 0 then
-		-- Collect positions of tail segments being removed
-		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-		local dropPositions = {}
-		if segFolder then
-			local currentFloor = math.floor(wormData.Segments)
-			for i = currentFloor, currentFloor - actualRemoved + 1, -1 do
-				local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
-				if seg then
-					table.insert(dropPositions, seg.Position)
-				end
+	local dropPositions = {}
+	if segFolder then
+		for i = removeStart, removeEnd do
+			local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
+			if seg then
+				table.insert(dropPositions, seg.Position)
 			end
 		end
-		if #dropPositions > 0 then
-			self:_dropFoodAtPositions(dropPositions, actualRemoved)
-		else
-			self:_dropFoodFromWorm(player, actualRemoved)
-		end
+	end
+	if #dropPositions > 0 then
+		self:_dropFoodAtPositions(dropPositions, actualRemoved)
+	else
+		self:_dropFoodFromWorm(player, actualRemoved)
 	end
 
 	-- Remove segments
-	local prevFloor = math.floor(wormData.Segments)
-	wormData.Segments = math.max(0, wormData.Segments - segmentsToRemove)
+	wormData.Segments = math.max(0, wormData.Segments - actualRemoved)
 	local newFloor = math.floor(wormData.Segments)
 
-	-- Destroy removed segment visuals
-	if newFloor < prevFloor then
-		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-		if segFolder then
-			for i = newFloor + 1, prevFloor do
+	-- Destroy removed segment visuals and renumber remaining tail segments
+	if segFolder then
+		-- Destroy the hit segments
+		for i = removeStart, removeEnd do
+			local seg = segFolder:FindFirstChild("Segment" .. i)
+			if seg then
+				seg:Destroy()
+			end
+		end
+
+		-- Renumber: segments after removeEnd shift down to fill the gap
+		if removeEnd < currentFloor then
+			for i = removeEnd + 1, currentFloor do
 				local seg = segFolder:FindFirstChild("Segment" .. i)
 				if seg then
-					seg:Destroy()
+					seg.Name = "Segment" .. (i - actualRemoved)
 				end
 			end
 		end
+	end
+
+	if newFloor < currentFloor then
 		self.Client.WormAte:Fire(player, newFloor)
 		self.PlayerScoreChanged:Fire(player, newFloor)
 		self:_updateLeaderstats(player, newFloor)
