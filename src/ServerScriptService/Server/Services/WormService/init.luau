@@ -28,6 +28,7 @@ type WormData = {
 local PowerUpService -- Set in KnitStart
 local ShrinkZoneService -- Set in KnitStart
 local TeamService -- Set in KnitStart
+local WeaponService -- Set in KnitStart
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
 
@@ -493,6 +494,85 @@ function WormService:_killWorm(player: Player, killer: Player?, killerBotName: s
 end
 
 --------------------------------------------------
+-- Weapon damage (called by WeaponService)
+--------------------------------------------------
+
+function WormService:DamageWorm(player: Player, segmentsToRemove: number, attacker: Player?, knockbackImpulse: Vector3?)
+	local wormData = self._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	-- Drop food from removed segments
+	local actualRemoved = math.min(segmentsToRemove, math.floor(wormData.Segments))
+	if actualRemoved > 0 then
+		-- Collect positions of tail segments being removed
+		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+		local dropPositions = {}
+		if segFolder then
+			local currentFloor = math.floor(wormData.Segments)
+			for i = currentFloor, currentFloor - actualRemoved + 1, -1 do
+				local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
+				if seg then
+					table.insert(dropPositions, seg.Position)
+				end
+			end
+		end
+		if #dropPositions > 0 then
+			self:_dropFoodAtPositions(dropPositions, actualRemoved)
+		else
+			self:_dropFoodFromWorm(player, actualRemoved)
+		end
+	end
+
+	-- Remove segments
+	local prevFloor = math.floor(wormData.Segments)
+	wormData.Segments = math.max(0, wormData.Segments - segmentsToRemove)
+	local newFloor = math.floor(wormData.Segments)
+
+	-- Destroy removed segment visuals
+	if newFloor < prevFloor then
+		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+		if segFolder then
+			for i = newFloor + 1, prevFloor do
+				local seg = segFolder:FindFirstChild("Segment" .. i)
+				if seg then
+					seg:Destroy()
+				end
+			end
+		end
+		self.Client.WormAte:Fire(player, newFloor)
+		self.PlayerScoreChanged:Fire(player, newFloor)
+		self:_updateLeaderstats(player, newFloor)
+	end
+
+	-- Apply knockback impulse to worm head
+	if knockbackImpulse then
+		local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if hrp then
+			local newPos = hrp.Position + knockbackImpulse.Unit * (knockbackImpulse.Magnitude * 0.1)
+			newPos = Vector3.new(newPos.X, 1, newPos.Z)
+			hrp.CFrame = CFrame.new(newPos, newPos + wormData.Direction)
+
+			local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+			if wormHead then
+				wormHead.CFrame = hrp.CFrame
+			end
+		end
+	end
+
+	-- Kill if segments reach 0
+	if wormData.Segments <= 0 then
+		self:_killWorm(player, attacker)
+	end
+end
+
+--------------------------------------------------
 -- Game loop
 --------------------------------------------------
 
@@ -943,6 +1023,11 @@ function WormService:SpawnGhost(player: Player)
 
 	self._ghosts[player] = ghost
 
+	-- Assign a random weapon to the ghost
+	if WeaponService then
+		WeaponService:AssignRandomWeapon(player)
+	end
+
 	-- Notify client
 	self.Client.GhostSpawned:Fire(player, spawnPos)
 end
@@ -952,6 +1037,12 @@ function WormService:DespawnGhost(player: Player)
 	if ghost then
 		ghost:Destroy()
 		self._ghosts[player] = nil
+
+		-- Clear weapon
+		if WeaponService then
+			WeaponService:ClearWeapon(player)
+		end
+
 		self.Client.GhostDespawned:Fire(player)
 	end
 end
@@ -1164,6 +1255,7 @@ function WormService:KnitStart()
 	PowerUpService = require(script.Parent.PowerUpService)
 	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
 	TeamService = require(script.Parent.TeamService)
+	WeaponService = require(script.Parent.WeaponService)
 
 	self:_createArena()
 	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)
