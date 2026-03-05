@@ -98,48 +98,171 @@ function WormService:_createArena()
 		baseplate:Destroy()
 	end
 
+	local arenaSize = WormConfig.ArenaSize
+	local halfArena = arenaSize / 2
+
+	-----------------------------------------------
+	-- Arena Floor
+	-----------------------------------------------
 	local arena = Instance.new("Part")
 	arena.Name = "Arena"
-	arena.Size = Vector3.new(WormConfig.ArenaSize, 1, WormConfig.ArenaSize)
+	arena.Size = Vector3.new(arenaSize, 1, arenaSize)
 	arena.Position = Vector3.new(0, -0.5, 0)
 	arena.Anchored = true
 	arena.Material = Enum.Material.SmoothPlastic
-	arena.Color = Color3.fromRGB(30, 30, 30)
+	arena.Color = Color3.fromRGB(10, 10, 15)
 	arena.Parent = workspace
 
-	-- Boundary walls
+	-----------------------------------------------
+	-- Grid Lines (TRON aesthetic)
+	-----------------------------------------------
+	local gridFolder = Instance.new("Folder")
+	gridFolder.Name = "ArenaGrid"
+	gridFolder.Parent = workspace
+
+	local GRID_SPACING = 40
+	local GRID_COLOR = Color3.fromRGB(0, 140, 255)
+	local GRID_TRANSPARENCY = 0.6
+	local GRID_HEIGHT = 0.15
+	local GRID_WIDTH = 0.4
+
+	-- X-axis lines (run along X, spaced along Z)
+	local z = -halfArena
+	while z <= halfArena do
+		local line = Instance.new("Part")
+		line.Name = "GridLineX"
+		line.Size = Vector3.new(arenaSize, GRID_HEIGHT, GRID_WIDTH)
+		line.Position = Vector3.new(0, GRID_HEIGHT / 2, z)
+		line.Anchored = true
+		line.CanCollide = false
+		line.CanQuery = false
+		line.CanTouch = false
+		line.Material = Enum.Material.Neon
+		line.Color = GRID_COLOR
+		line.Transparency = GRID_TRANSPARENCY
+		line.Parent = gridFolder
+		z += GRID_SPACING
+	end
+
+	-- Z-axis lines (run along Z, spaced along X)
+	local x = -halfArena
+	while x <= halfArena do
+		local line = Instance.new("Part")
+		line.Name = "GridLineZ"
+		line.Size = Vector3.new(GRID_WIDTH, GRID_HEIGHT, arenaSize)
+		line.Position = Vector3.new(x, GRID_HEIGHT / 2, 0)
+		line.Anchored = true
+		line.CanCollide = false
+		line.CanQuery = false
+		line.CanTouch = false
+		line.Material = Enum.Material.Neon
+		line.Color = GRID_COLOR
+		line.Transparency = GRID_TRANSPARENCY
+		line.Parent = gridFolder
+		x += GRID_SPACING
+	end
+
+	-----------------------------------------------
+	-- Boundary Walls with Neon Edges
+	-----------------------------------------------
 	local wallHeight = 20
 	local wallThickness = 4
+	local edgeHeight = 0.5
+	local WALL_COLOR = Color3.fromRGB(15, 15, 25)
+	local EDGE_COLOR = Color3.fromRGB(255, 0, 60)
+
 	local wallData = {
-		{ Vector3.new(WormConfig.ArenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, HALF_ARENA) },
-		{ Vector3.new(WormConfig.ArenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, -HALF_ARENA) },
-		{ Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize), Vector3.new(HALF_ARENA, wallHeight / 2, 0) },
-		{ Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize), Vector3.new(-HALF_ARENA, wallHeight / 2, 0) },
+		{ Vector3.new(arenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, halfArena) },
+		{ Vector3.new(arenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, -halfArena) },
+		{ Vector3.new(wallThickness, wallHeight, arenaSize), Vector3.new(halfArena, wallHeight / 2, 0) },
+		{ Vector3.new(wallThickness, wallHeight, arenaSize), Vector3.new(-halfArena, wallHeight / 2, 0) },
 	}
 	for i, data in wallData do
+		-- Main wall body (dark, semi-transparent)
 		local wall = Instance.new("Part")
 		wall.Name = "Wall" .. i
 		wall.Size = data[1]
 		wall.Position = data[2]
 		wall.Anchored = true
 		wall.Material = Enum.Material.SmoothPlastic
-		wall.Color = Color3.fromRGB(80, 0, 0)
-		wall.Transparency = 0.5
+		wall.Color = WALL_COLOR
+		wall.Transparency = 0.7
 		wall.Parent = workspace
+
+		-- Bottom neon edge
+		local bottomEdge = Instance.new("Part")
+		bottomEdge.Name = "WallEdgeBottom" .. i
+		bottomEdge.Size = Vector3.new(data[1].X, edgeHeight, data[1].Z)
+		bottomEdge.Position = Vector3.new(data[2].X, edgeHeight / 2, data[2].Z)
+		bottomEdge.Anchored = true
+		bottomEdge.CanCollide = false
+		bottomEdge.CanQuery = false
+		bottomEdge.CanTouch = false
+		bottomEdge.Material = Enum.Material.Neon
+		bottomEdge.Color = EDGE_COLOR
+		bottomEdge.Transparency = 0.1
+		bottomEdge.Parent = workspace
+
+		-- Top neon edge
+		local topEdge = Instance.new("Part")
+		topEdge.Name = "WallEdgeTop" .. i
+		topEdge.Size = Vector3.new(data[1].X, edgeHeight, data[1].Z)
+		topEdge.Position = Vector3.new(data[2].X, wallHeight - edgeHeight / 2, data[2].Z)
+		topEdge.Anchored = true
+		topEdge.CanCollide = false
+		topEdge.CanQuery = false
+		topEdge.CanTouch = false
+		topEdge.Material = Enum.Material.Neon
+		topEdge.Color = EDGE_COLOR
+		topEdge.Transparency = 0.1
+		topEdge.Parent = workspace
 	end
 
-	-- Configure lighting to remove reflections and default environment effects
+	-----------------------------------------------
+	-- Lighting Configuration
+	-----------------------------------------------
 	local Lighting = game:GetService("Lighting")
-	Lighting.EnvironmentDiffuseScale = 0
-	Lighting.EnvironmentSpecularScale = 0
-	Lighting.GlobalShadows = true
-	Lighting.Brightness = 2
-	Lighting.ClockTime = 14
-	-- Note: Lighting.Technology is read-only from scripts; set it in Studio properties
-	-- Remove any default children (Sky, Atmosphere, Bloom, etc.)
+
+	-- Remove any default children first (Sky, Atmosphere, Bloom, etc.)
 	for _, child in Lighting:GetChildren() do
 		child:Destroy()
 	end
+
+	-- Note: Lighting.Technology is read-only from scripts; set it in Studio properties
+	Lighting.ClockTime = 0
+	Lighting.Brightness = 0.2
+	Lighting.Ambient = Color3.fromRGB(25, 25, 40)
+	Lighting.OutdoorAmbient = Color3.fromRGB(15, 15, 25)
+	Lighting.EnvironmentDiffuseScale = 0
+	Lighting.EnvironmentSpecularScale = 0.1
+	Lighting.GlobalShadows = false
+	Lighting.FogEnd = 10000
+	Lighting.FogStart = 10000
+
+	-- Atmosphere: dark void with blue-tinted fog for depth
+	local atmosphere = Instance.new("Atmosphere")
+	atmosphere.Density = 0.35
+	atmosphere.Offset = 0.25
+	atmosphere.Color = Color3.fromRGB(8, 8, 20)
+	atmosphere.Decay = Color3.fromRGB(5, 5, 15)
+	atmosphere.Glare = 0
+	atmosphere.Haze = 2
+	atmosphere.Parent = Lighting
+
+	-- Bloom: makes Neon material glow
+	local bloom = Instance.new("BloomEffect")
+	bloom.Intensity = 0.8
+	bloom.Size = 18
+	bloom.Threshold = 0.8
+	bloom.Parent = Lighting
+
+	-- Color correction: slight blue tint, boosted contrast
+	local cc = Instance.new("ColorCorrectionEffect")
+	cc.Brightness = -0.05
+	cc.Contrast = 0.15
+	cc.Saturation = 0.2
+	cc.TintColor = Color3.fromRGB(230, 240, 255)
+	cc.Parent = Lighting
 end
 
 local function pickFoodTier()
