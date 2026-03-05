@@ -1110,8 +1110,12 @@ function WormUIController:_updateMinimap()
 		local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
 
 		if player == LocalPlayer then
-			-- Triangle arrow showing heading direction
-			local dir = if self._wormController then self._wormController._direction else Vector3.new(0, 0, -1)
+			-- Triangle arrow showing actual heading direction (use model CFrame, not target direction)
+			local dir = Vector3.new(0, 0, -1)
+			local hrpLocal = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+			if hrpLocal then
+				dir = hrpLocal.CFrame.LookVector
+			end
 			local angle = math.deg(math.atan2(dir.X, -dir.Z))
 
 			local arrow = Instance.new("TextLabel")

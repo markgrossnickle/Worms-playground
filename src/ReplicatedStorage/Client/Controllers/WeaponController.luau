@@ -87,6 +87,15 @@ function WeaponController:TryShoot()
 	self._ammo -= 1 -- Optimistic update
 	self.AmmoChanged:Fire(self._ammo)
 
+	-- Client-side visual: raycast to find hit point, then show tracer immediately
+	local range = weaponDef.Range
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = { LocalPlayer.Character :: Instance }
+	local rayResult = workspace:Raycast(origin, direction * range, raycastParams)
+	local hitPos = if rayResult then rayResult.Position else origin + direction * range
+	self:_spawnProjectileVisual(LocalPlayer.Name, origin, hitPos, nil)
+
 	-- Send to server
 	self._weaponService:Shoot(origin, direction)
 end

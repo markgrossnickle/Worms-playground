@@ -577,7 +577,7 @@ function WormService:DamageWorm(player: Player, segmentsToRemove: number, attack
 		if hrp then
 			local newPos = hrp.Position + knockbackImpulse.Unit * (knockbackImpulse.Magnitude * 0.1)
 			newPos = Vector3.new(newPos.X, 1, newPos.Z)
-			hrp.CFrame = CFrame.new(newPos, newPos + wormData.Direction)
+			hrp.CFrame = CFrame.new(newPos, newPos + wormData.CurrentDirection)
 
 			local wormHead = character:FindFirstChild("WormHead") :: BasePart?
 			if wormHead then
