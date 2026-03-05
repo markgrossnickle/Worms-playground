@@ -442,6 +442,10 @@ function WormController:_connectServerSignals()
 		end
 	end))
 
+	self._trove:Add(self._wormService.GhostKnockoff:Connect(function(knockbackDir: Vector3)
+		self:_onKnockoff(knockbackDir)
+	end))
+
 	-- Suppress Knit warnings for signals we don't directly use here
 	self._trove:Add(self._powerUpService.PowerUpSpawned:Connect(function() end))
 	self._trove:Add(self._powerUpService.PowerUpCollected:Connect(function() end))
@@ -784,6 +788,11 @@ function WormController:_attachToWorm()
 
 	self._grappleState = "RIDING"
 
+	-- Notify server for speed boost tracking
+	if self._grappleTargetName then
+		self._wormService:GrappleAttached(self._grappleTargetName)
+	end
+
 	-- Disable humanoid movement so ghost doesn't walk off
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if humanoid then
@@ -792,6 +801,11 @@ function WormController:_attachToWorm()
 end
 
 function WormController:_detachGrapple()
+	-- Notify server before cleanup if we were riding
+	if self._grappleState == "RIDING" then
+		self._wormService:GrappleDetached()
+	end
+
 	local character = LocalPlayer.Character
 
 	-- Clean weld
@@ -821,6 +835,38 @@ function WormController:_detachGrapple()
 	self._grappleTarget = nil
 	self._grappleTargetName = nil
 	self._grapplePullStartPos = nil
+end
+
+function WormController:_onKnockoff(knockbackDir: Vector3)
+	if not self._inGhostMode then
+		return
+	end
+
+	-- Detach from worm
+	self:_detachGrapple()
+
+	-- Apply knockback impulse
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if hrp then
+		hrp:ApplyImpulse(knockbackDir * WormConfig.Ghost.KnockbackForce)
+	end
+
+	-- Stun: disable movement temporarily
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.WalkSpeed = 0
+		humanoid.JumpPower = 0
+		task.delay(WormConfig.Ghost.KnockoffStunDuration, function()
+			if humanoid and humanoid.Parent and self._inGhostMode then
+				humanoid.WalkSpeed = WormConfig.Ghost.WalkSpeed
+				humanoid.JumpPower = WormConfig.Ghost.JumpPower
+			end
+		end)
+	end
 end
 
 function WormController:_onGhostClick()

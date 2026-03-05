@@ -78,6 +78,9 @@ local WormUIController = Knit.CreateController({
 	_weaponSlotStroke = nil :: UIStroke?,
 	_weaponController = nil :: any,
 	_maxAmmo = 0,
+
+	-- Rider notification (shown to worm player when a ghost rides them)
+	_riderNotifyLabel = nil :: TextLabel?,
 })
 
 --------------------------------------------------
@@ -141,6 +144,7 @@ function WormUIController:_buildUI()
 	self:_buildCoinDisplay(gui)
 	self:_buildCrosshair(gui)
 	self:_buildToolbar(gui)
+	self:_buildRiderNotification(gui)
 end
 
 function WormUIController:_buildSegmentCounter(parent: ScreenGui)
@@ -783,6 +787,23 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	end)
 end
 
+function WormUIController:_buildRiderNotification(parent: ScreenGui)
+	local label = Instance.new("TextLabel")
+	label.Name = "RiderNotification"
+	label.Text = ""
+	label.Size = UDim2.new(0, 350, 0, 30)
+	label.Position = UDim2.new(0.5, 0, 0.12, 0)
+	label.AnchorPoint = Vector2.new(0.5, 0.5)
+	label.BackgroundTransparency = 1
+	label.TextSize = 18
+	label.TextColor3 = Color3.fromRGB(100, 220, 255)
+	label.Font = Enum.Font.GothamBold
+	label.TextStrokeColor3 = Color3.new(0, 0, 0)
+	label.TextStrokeTransparency = 0.5
+	label.Parent = parent
+	self._riderNotifyLabel = label
+end
+
 function WormUIController:_buildToolbarSlot(
 	parent: Frame,
 	keyHint: string,
@@ -1314,6 +1335,10 @@ function WormUIController:KnitStart()
 		self:_hideFinalScoreboard()
 		self:_hideCountdown()
 		self:_updateSegmentCounter(WormConfig.InitialSegments)
+		-- Clear rider notification on respawn
+		if self._riderNotifyLabel then
+			self._riderNotifyLabel.Text = ""
+		end
 	end))
 
 	-- Power-up signals from WormController
@@ -1461,6 +1486,19 @@ function WormUIController:KnitStart()
 		-- Update hint text
 		if self._grappleHint then
 			self._grappleHint.Text = if slot == 1 then "LMB to hook" else "Press [1]"
+		end
+	end))
+
+	-- Wire rider notification (shown to alive worm player when a ghost mounts/dismounts)
+	self._trove:Add(self._wormService.RiderAttached:Connect(function(_riderName: string)
+		if self._riderNotifyLabel then
+			self._riderNotifyLabel.Text = "Ghost riding! +15% speed"
+		end
+	end))
+
+	self._trove:Add(self._wormService.RiderDetached:Connect(function(_riderName: string)
+		if self._riderNotifyLabel then
+			self._riderNotifyLabel.Text = ""
 		end
 	end))
 

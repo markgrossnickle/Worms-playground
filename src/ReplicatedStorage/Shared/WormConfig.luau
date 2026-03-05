@@ -67,4 +67,18 @@ return {
 		{ Name = "Green", Color = Color3.fromRGB(60, 220, 60) },
 		{ Name = "Yellow", Color = Color3.fromRGB(255, 220, 50) },
 	},
+
+	-- Ghost mode
+	Ghost = {
+		WalkSpeed = 24,
+		JumpPower = 30,
+		AvatarScale = 0.5,
+		Transparency = 0.45,
+		RiderSpeedBoostPerGhost = 0.15, -- +15% worm speed per riding ghost
+		MaxRiderSpeedBoost = 2.0, -- cap at 2x total from riders
+		KnockoffStunDuration = 1.5, -- seconds ghost is stunned after being shot off
+		KnockbackForce = 50,
+		GlowBrightness = 0.8,
+		GlowRange = 6,
+	},
 }
