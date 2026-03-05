@@ -135,7 +135,7 @@ function WormService:_createArena()
 	Lighting.GlobalShadows = true
 	Lighting.Brightness = 2
 	Lighting.ClockTime = 14
-	Lighting.Technology = Enum.Technology.ShadowMap
+	-- Note: Lighting.Technology is read-only from scripts; set it in Studio properties
 	-- Remove any default children (Sky, Atmosphere, Bloom, etc.)
 	for _, child in Lighting:GetChildren() do
 		child:Destroy()
