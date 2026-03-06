@@ -271,7 +271,7 @@ function AudioController:_playMusic(key: string)
 	newMusic.Name = "Music_" .. key
 	newMusic.SoundId = soundId
 	newMusic.SoundGroup = self._masterGroup
-	newMusic.Looping = true
+	newMusic.Looped = true
 	newMusic.Volume = 0
 	newMusic.Parent = SoundService
 
@@ -327,7 +327,7 @@ function AudioController:_startBoostSound()
 	sound.Name = "BoostLoop"
 	sound.SoundId = SoundIds.BoostLoop
 	sound.SoundGroup = self._masterGroup
-	sound.Looping = true
+	sound.Looped = true
 	sound.Volume = 0.5
 	sound.Parent = SoundService
 	if not self._muted then
