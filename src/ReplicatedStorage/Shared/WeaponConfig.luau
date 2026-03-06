@@ -1,6 +1,6 @@
 --!strict
 
-export type WeaponType = "Blaster" | "RapidFire" | "HighVoltage"
+export type WeaponType = "Blaster" | "RapidFire" | "HighVoltage" | "Grenade" | "PowerShot"
 
 export type WeaponDef = {
 	Name: string,
@@ -11,6 +11,25 @@ export type WeaponDef = {
 	Knockback: number, -- impulse force on hit
 	ProjectileSpeed: number, -- studs per second (for visual only; server raycasts instantly)
 	RayRadius: number, -- raycast thickness
+	-- Projectile weapons (Grenade, PowerShot)
+	IsProjectile: boolean?,
+	ExplosionRadius: number?,
+	FuseTime: number?,
+	MaxBounces: number?,
+	BounceDecay: number?,
+	Gravity: number?,
+	LaunchForce: number?,
+	-- PowerShot charge
+	IsChargeable: boolean?,
+	ChargeTime: number?,
+	MinDamage: number?,
+	MaxDamage: number?,
+	MinSize: number?,
+	MaxSize: number?,
+	MinSpeed: number?,
+	MaxSpeed: number?,
+	MinExplosionRadius: number?,
+	MaxExplosionRadius: number?,
 }
 
 local WeaponConfig = {
@@ -45,9 +64,47 @@ local WeaponConfig = {
 			ProjectileSpeed = 200,
 			RayRadius = 1.0,
 		} :: WeaponDef,
+		Grenade = {
+			Name = "Grenade",
+			Damage = 5, -- segments removed per worm in explosion
+			Ammo = 4,
+			FireRate = 60, -- 1 throw/sec
+			Range = 200,
+			Knockback = 50,
+			ProjectileSpeed = 0, -- not used (physics-based)
+			RayRadius = 0,
+			IsProjectile = true,
+			ExplosionRadius = 15,
+			FuseTime = 3,
+			MaxBounces = 5,
+			BounceDecay = 0.8,
+			Gravity = 9.8,
+			LaunchForce = 120,
+		} :: WeaponDef,
+		PowerShot = {
+			Name = "PowerShot",
+			Damage = 2, -- min damage (used as base; actual scaled by charge)
+			Ammo = 3,
+			FireRate = 30, -- 0.5 shots/sec
+			Range = 300,
+			Knockback = 60,
+			ProjectileSpeed = 150, -- max speed (min charge)
+			RayRadius = 0,
+			IsProjectile = true,
+			IsChargeable = true,
+			ChargeTime = 2, -- seconds to full charge
+			MinDamage = 2,
+			MaxDamage = 10,
+			MinSize = 1,
+			MaxSize = 4,
+			MinSpeed = 60, -- slower at max charge (heavier)
+			MaxSpeed = 150, -- faster at min charge
+			MinExplosionRadius = 12,
+			MaxExplosionRadius = 20,
+		} :: WeaponDef,
 	} :: { [string]: WeaponDef },
 
-	WeaponNames = { "Blaster", "RapidFire", "HighVoltage" } :: { WeaponType },
+	WeaponNames = { "Blaster", "RapidFire", "HighVoltage", "Grenade", "PowerShot" } :: { WeaponType },
 
 	-- Tolerance for fire rate checks (seconds)
 	FireRateTolerance = 0.05,
