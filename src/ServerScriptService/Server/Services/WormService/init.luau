@@ -30,6 +30,9 @@ local ShrinkZoneService -- Set in KnitStart
 local TeamService -- Set in KnitStart
 local WeaponService -- Set in KnitStart
 
+local GHOST_FOOD_VALUE = 3 -- segments gained by eating a ghost
+local GHOST_RESPAWN_DELAY = 5 -- seconds before eaten ghost respawns
+
 local HALF_ARENA = WormConfig.ArenaSize / 2
 
 -- Position history: record a position every MIN_RECORD_DISTANCE studs.
@@ -77,6 +80,21 @@ end
 
 function WormService:_randomColor(): Color3
 	return Color3.fromHSV(math.random(), 0.8, 0.9)
+end
+
+function WormService:_applyTeamColor(character: Model, teamColor: Color3)
+	local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+	if wormHead then
+		wormHead.Color = teamColor
+	end
+	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+	if segFolder then
+		for _, seg in segFolder:GetChildren() do
+			if seg:IsA("BasePart") then
+				seg.Color = teamColor
+			end
+		end
+	end
 end
 
 function WormService:_updateLeaderstats(player: Player, segments: number)
@@ -430,9 +448,14 @@ function WormService:_spawnWorm(player: Player)
 
 	self:_setupCharacter(player, character)
 
-	-- Assign team if team mode is active
+	-- Assign team and apply team color
 	if TeamService:IsEnabled() then
-		TeamService:AssignToTeam(player.Name)
+		local teamIndex = TeamService:AssignToTeam(player.Name)
+		local teamColor = TeamService:GetTeamColor(teamIndex)
+		if teamColor then
+			wormData.Color = teamColor
+			self:_applyTeamColor(character, teamColor)
+		end
 	end
 
 	self:_updateLeaderstats(player, wormData.Segments)
@@ -721,6 +744,94 @@ function WormService:_checkBounds(player: Player, headPos: Vector3)
 	end
 end
 
+function WormService:_checkGhostEating(player: Player, headPos: Vector3)
+	local wormData = self._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	for ghostPlayer, ghost in self._ghosts do
+		-- Skip friendly ghosts
+		if TeamService:AreTeammates(player.Name, ghostPlayer.Name) then
+			continue
+		end
+
+		local ghostHrp = ghost:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if not ghostHrp then
+			continue
+		end
+
+		local dist = (ghostHrp.Position - headPos).Magnitude
+		if dist < WormConfig.CollisionRadius + 1 then
+			-- Eat the ghost: add segments to the worm
+			local prevFloor = math.floor(wormData.Segments)
+			wormData.Segments += GHOST_FOOD_VALUE
+			if wormData.Segments > wormData.MaxSegments then
+				wormData.MaxSegments = wormData.Segments
+			end
+			local newFloor = math.floor(wormData.Segments)
+
+			local character = player.Character
+			if character then
+				for i = prevFloor + 1, newFloor do
+					self:_createSegment(character, player, i, wormData.Color)
+				end
+			end
+
+			self.Client.WormAte:Fire(player, wormData.Segments)
+			self.PlayerScoreChanged:Fire(player, wormData.Segments)
+			self:_updateLeaderstats(player, wormData.Segments)
+
+			-- Despawn the ghost
+			self:DespawnGhost(ghostPlayer)
+
+			-- Respawn ghost after delay
+			task.delay(GHOST_RESPAWN_DELAY, function()
+				-- Only respawn if player is still in game and round is active and still dead
+				local data = self._worms[ghostPlayer]
+				if data and data.State ~= "Alive" and self._roundActive then
+					self:SpawnGhost(ghostPlayer, "Blaster")
+				end
+			end)
+
+			return -- only eat one ghost per frame
+		end
+	end
+end
+
+function WormService:_checkBotGhostEating(botName: string, headPos: Vector3)
+	for ghostPlayer, ghost in self._ghosts do
+		-- Skip friendly ghosts
+		if TeamService:AreTeammates(botName, ghostPlayer.Name) then
+			continue
+		end
+
+		local ghostHrp = ghost:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if not ghostHrp then
+			continue
+		end
+
+		local dist = (ghostHrp.Position - headPos).Magnitude
+		if dist < WormConfig.CollisionRadius + 1 then
+			-- Add segments to the bot via AddSegments
+			self:AddSegments(botName, GHOST_FOOD_VALUE)
+
+			-- Despawn the ghost
+			self:DespawnGhost(ghostPlayer)
+
+			-- Respawn ghost after delay
+			task.delay(GHOST_RESPAWN_DELAY, function()
+				local data = self._worms[ghostPlayer]
+				if data and data.State ~= "Alive" and self._roundActive then
+					self:SpawnGhost(ghostPlayer, "Blaster")
+				end
+			end)
+
+			return
+		end
+	end
+end
+
 function WormService:_updateSegments(player: Player)
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
@@ -845,6 +956,15 @@ function WormService:_gameStep(dt: number)
 		self:_checkFoodCollection(player, headPos)
 		self:_checkWormCollisions(player, headPos)
 		self:_checkBounds(player, headPos)
+		self:_checkGhostEating(player, headPos)
+	end
+
+	-- Check bot worm heads eating enemy ghosts
+	for botName, botInfo in self._botModels do
+		local botHrp = botInfo.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if botHrp then
+			self:_checkBotGhostEating(botName, botHrp.Position)
+		end
 	end
 end
 
@@ -924,7 +1044,7 @@ end
 -- Ghost mode (dead player first-person)
 --------------------------------------------------
 
-function WormService:SpawnGhost(player: Player)
+function WormService:SpawnGhost(player: Player, weaponType: string?)
 	-- Remove existing ghost if any
 	self:DespawnGhost(player)
 
@@ -958,12 +1078,24 @@ function WormService:SpawnGhost(player: Player)
 	humanoid.Health = math.huge
 	humanoid.Parent = ghost
 
+	-- Determine ghost color (team color if team mode, default ghostly blue otherwise)
+	local ghostColor = Color3.fromRGB(180, 200, 255)
+	if TeamService:IsEnabled() then
+		local teamIndex = TeamService:GetTeamForMember(player.Name)
+		if teamIndex then
+			local teamColor = TeamService:GetTeamColor(teamIndex)
+			if teamColor then
+				ghostColor = teamColor
+			end
+		end
+	end
+
 	-- Ghost head (small sphere)
 	local head = Instance.new("Part")
 	head.Name = "Head"
 	head.Shape = Enum.PartType.Ball
 	head.Size = Vector3.new(0.5, 0.5, 0.5)
-	head.Color = Color3.fromRGB(180, 200, 255)
+	head.Color = ghostColor
 	head.Material = Enum.Material.Neon
 	head.Transparency = 0.4
 	head.CanCollide = false
@@ -980,7 +1112,7 @@ function WormService:SpawnGhost(player: Player)
 	local torso = Instance.new("Part")
 	torso.Name = "Torso"
 	torso.Size = Vector3.new(0.5, 0.67, 0.33)
-	torso.Color = Color3.fromRGB(150, 170, 220)
+	torso.Color = ghostColor
 	torso.Material = Enum.Material.Neon
 	torso.Transparency = 0.4
 	torso.CanCollide = false
@@ -1004,7 +1136,7 @@ function WormService:SpawnGhost(player: Player)
 	nameLabel.Size = UDim2.fromScale(1, 1)
 	nameLabel.BackgroundTransparency = 1
 	nameLabel.Text = player.Name
-	nameLabel.TextColor3 = Color3.fromRGB(180, 200, 255)
+	nameLabel.TextColor3 = ghostColor
 	nameLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
 	nameLabel.TextStrokeTransparency = 0.5
 	nameLabel.Font = Enum.Font.GothamBold
@@ -1023,9 +1155,13 @@ function WormService:SpawnGhost(player: Player)
 
 	self._ghosts[player] = ghost
 
-	-- Assign a random weapon to the ghost
+	-- Assign weapon to the ghost
 	if WeaponService then
-		WeaponService:AssignRandomWeapon(player)
+		if weaponType then
+			WeaponService:AssignWeapon(player, weaponType)
+		else
+			WeaponService:AssignRandomWeapon(player)
+		end
 	end
 
 	-- Notify client

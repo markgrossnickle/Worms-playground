@@ -291,9 +291,34 @@ function BotService:_spawnBot()
 	self._bots[name] = botData
 	WormService:RegisterBot(name, model, botData.Segments)
 
-	-- Assign to team if team mode enabled
+	-- Assign to team and apply team color
 	if TeamService:IsEnabled() then
-		TeamService:AssignToTeam(name)
+		local teamIndex = TeamService:AssignToTeam(name)
+		local teamColor = TeamService:GetTeamColor(teamIndex)
+		if teamColor then
+			botData.Color = teamColor
+			-- Recolor head and segments
+			local wormHead = model:FindFirstChild("WormHead") :: BasePart?
+			if wormHead then
+				wormHead.Color = teamColor
+				-- Update name label color
+				local billboard = wormHead:FindFirstChild("NameLabel")
+				if billboard then
+					local nameLabel = billboard:FindFirstChildOfClass("TextLabel")
+					if nameLabel then
+						nameLabel.TextColor3 = teamColor
+					end
+				end
+			end
+			local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+			if segFolder then
+				for _, seg in segFolder:GetChildren() do
+					if seg:IsA("BasePart") then
+						seg.Color = teamColor
+					end
+				end
+			end
+		end
 	end
 end
 

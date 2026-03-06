@@ -13,6 +13,7 @@ type WeaponType = WeaponConfig.WeaponType
 local FIRE_RATE_TOLERANCE = WeaponConfig.FireRateTolerance
 
 local WormService -- Set in KnitStart
+local TeamService -- Set in KnitStart
 
 local WeaponService = Knit.CreateService({
 	Name = "WeaponService",
@@ -38,6 +39,21 @@ function WeaponService:AssignRandomWeapon(player: Player)
 	local names = WeaponConfig.WeaponNames
 	local weaponType = names[math.random(1, #names)]
 	local weaponDef = WeaponConfig.Weapons[weaponType]
+
+	self._weapons[player] = {
+		Type = weaponType,
+		Ammo = weaponDef.Ammo,
+	}
+	self._lastShotTimestamps[player] = 0
+
+	self.Client.WeaponAssigned:Fire(player, weaponType, weaponDef.Ammo)
+end
+
+function WeaponService:AssignWeapon(player: Player, weaponType: WeaponType)
+	local weaponDef = WeaponConfig.Weapons[weaponType]
+	if not weaponDef then
+		return
+	end
 
 	self._weapons[player] = {
 		Type = weaponType,
@@ -167,18 +183,21 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 			-- Check if it's a player worm
 			local hitPlayer = Players:GetPlayerFromCharacter(hitModel)
 			if hitPlayer and hitPlayer ~= player then
-				local targetWormData = WormService:GetWormData_Server(hitPlayer)
-				if targetWormData and targetWormData.State == "Alive" then
-					hitPlayerName = hitPlayer.Name
-					WormService:DamageWorm(hitPlayer, weaponDef.Damage, player, dir * weaponDef.Knockback)
-					self.Client.HitConfirmed:Fire(player, hitPlayer.Name, weaponDef.Damage)
-					self.WeaponHit:Fire(player, hitPlayer, weaponDef.Damage)
+				-- Skip friendly fire — teammates can't damage each other
+				if not TeamService:AreTeammates(player.Name, hitPlayer.Name) then
+					local targetWormData = WormService:GetWormData_Server(hitPlayer)
+					if targetWormData and targetWormData.State == "Alive" then
+						hitPlayerName = hitPlayer.Name
+						WormService:DamageWorm(hitPlayer, weaponDef.Damage, player, dir * weaponDef.Knockback)
+						self.Client.HitConfirmed:Fire(player, hitPlayer.Name, weaponDef.Damage)
+						self.WeaponHit:Fire(player, hitPlayer, weaponDef.Damage)
+					end
 				end
 			else
 				-- Check if it's a bot worm (model in workspace with WormSegments)
 				local segFolder = hitModel:FindFirstChild("WormSegments")
 				local wormHead = hitModel:FindFirstChild("WormHead")
-				if segFolder or wormHead then
+				if (segFolder or wormHead) and not TeamService:AreTeammates(player.Name, hitModel.Name) then
 					hitPlayerName = hitModel.Name
 					-- Bot damage is handled differently — just report the hit
 					-- BotService can listen to WeaponHit signal if needed
@@ -216,6 +235,7 @@ end
 
 function WeaponService:KnitStart()
 	WormService = require(script.Parent.WormService)
+	TeamService = require(script.Parent.TeamService)
 end
 
 return WeaponService

@@ -58,7 +58,7 @@ return {
 	ShrinkEndTime = 180, -- seconds after game start when zone fully closes
 	ShrinkMinRadius = 40, -- zone stops shrinking at this radius
 	-- Teams
-	TeamModeEnabled = false,
+	TeamModeEnabled = true,
 	TeamSize = 2,
 	TeamColors = {
 		{ Name = "Red", Color = Color3.fromRGB(255, 60, 60) },
