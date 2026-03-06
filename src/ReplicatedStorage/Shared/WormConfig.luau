@@ -33,7 +33,7 @@ return {
 	-- Gameplay
 	RespawnDelay = 3,
 	CollisionRadius = 2,
-	SpeedScaleFactor = 0.02,
+	SpeedScaleFactor = 0.008,
 
 	-- Power-ups
 	PowerUpSpawnIntervalMin = 10,
@@ -59,7 +59,7 @@ return {
 	ShrinkEndTime = 180, -- seconds after game start when zone fully closes
 	ShrinkMinRadius = 40, -- zone stops shrinking at this radius
 	-- Teams
-	TeamModeEnabled = false,
+	TeamModeEnabled = true,
 	TeamSize = 2,
 	TeamColors = {
 		{ Name = "Red", Color = Color3.fromRGB(255, 60, 60) },
