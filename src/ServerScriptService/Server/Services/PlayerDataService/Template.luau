@@ -10,6 +10,8 @@ export type PlayerData = {
 	Level: number,
 	LastLoginDate: string,
 	LoginStreak: number,
+	OwnedSkins: { string },
+	EquippedSkin: string,
 	Milestones: {
 		FirstJoin: boolean,
 		FirstWin: boolean,
@@ -25,6 +27,8 @@ local playerDataTemplate: PlayerData = {
 	Level = 1,
 	LastLoginDate = "",
 	LoginStreak = 0,
+	OwnedSkins = { "default" },
+	EquippedSkin = "default",
 	Milestones = {
 		FirstJoin = false,
 		FirstWin = false,
