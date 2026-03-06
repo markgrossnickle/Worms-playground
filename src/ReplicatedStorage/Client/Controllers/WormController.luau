@@ -83,6 +83,9 @@ local WormController = Knit.CreateController({
 	-- Tool slot selection (ghost mode)
 	_selectedSlot = 1 :: number, -- 1 = Grapple, 2 = Weapon
 	SelectedSlotChanged = Signal.new(), -- (slotNumber)
+
+	-- Power-up hiding in ghost mode
+	_powerUpHideConn = nil :: RBXScriptConnection?,
 })
 
 --------------------------------------------------
@@ -662,6 +665,84 @@ function WormController:ToggleGhostMode()
 	self._wormService:ToggleGhost()
 end
 
+function WormController:_hidePowerUpPart(part: Instance)
+	if part:IsA("BasePart") then
+		(part :: BasePart).Transparency = 1
+	end
+	if part:IsA("BasePart") then
+		local light = part:FindFirstChildOfClass("PointLight")
+		if light then
+			light.Enabled = false
+		end
+	end
+	local billboard = part:FindFirstChildOfClass("BillboardGui")
+	if billboard then
+		billboard.Enabled = false
+	end
+	for _, child in part:GetChildren() do
+		if child:IsA("BasePart") then
+			(child :: BasePart).Transparency = 1
+		end
+	end
+end
+
+function WormController:_showPowerUpPart(part: Instance)
+	if part:IsA("BasePart") then
+		(part :: BasePart).Transparency = 0
+	end
+	if part:IsA("BasePart") then
+		local light = part:FindFirstChildOfClass("PointLight")
+		if light then
+			light.Enabled = true
+		end
+	end
+	local billboard = part:FindFirstChildOfClass("BillboardGui")
+	if billboard then
+		billboard.Enabled = true
+	end
+	for _, child in part:GetChildren() do
+		if child:IsA("BasePart") then
+			-- Pillar has Transparency = 0.5
+			if child.Name == "Pillar" then
+				(child :: BasePart).Transparency = 0.5
+			else
+				(child :: BasePart).Transparency = 0
+			end
+		end
+	end
+end
+
+function WormController:_hideAllPowerUps()
+	local folder = workspace:FindFirstChild("PowerUps")
+	if not folder then
+		return
+	end
+	for _, child in folder:GetChildren() do
+		self:_hidePowerUpPart(child)
+	end
+	-- Hide any new power-ups that spawn while in ghost mode
+	if self._powerUpHideConn then
+		self._powerUpHideConn:Disconnect()
+	end
+	self._powerUpHideConn = folder.ChildAdded:Connect(function(child)
+		self:_hidePowerUpPart(child)
+	end)
+end
+
+function WormController:_showAllPowerUps()
+	if self._powerUpHideConn then
+		self._powerUpHideConn:Disconnect()
+		self._powerUpHideConn = nil
+	end
+	local folder = workspace:FindFirstChild("PowerUps")
+	if not folder then
+		return
+	end
+	for _, child in folder:GetChildren() do
+		self:_showPowerUpPart(child)
+	end
+end
+
 function WormController:_enterGhostMode()
 	self._inGhostMode = true
 	self._freeCamActive = false
@@ -671,6 +752,9 @@ function WormController:_enterGhostMode()
 	-- Reset tool selection to grapple
 	self._selectedSlot = 1
 	self.SelectedSlotChanged:Fire(1)
+
+	-- Hide power-ups from ghost players
+	self:_hideAllPowerUps()
 
 	-- Switch to first-person camera
 	Camera.CameraType = Enum.CameraType.Custom
@@ -689,6 +773,9 @@ function WormController:_exitGhostMode()
 	end
 
 	self._inGhostMode = false
+
+	-- Restore power-up visibility
+	self:_showAllPowerUps()
 
 	-- Restore camera
 	LocalPlayer.CameraMode = Enum.CameraMode.Classic

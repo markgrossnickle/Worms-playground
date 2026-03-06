@@ -79,7 +79,7 @@ local WeaponConfig = {
 			MaxBounces = 5,
 			BounceDecay = 0.8,
 			Gravity = 9.8,
-			LaunchForce = 120,
+			LaunchForce = 50,
 		} :: WeaponDef,
 		PowerShot = {
 			Name = "PowerShot",

@@ -378,7 +378,8 @@ function WeaponService:_spawnGrenade(player: Player, origin: Vector3, direction:
 	self.Client.AmmoChanged:Fire(player, weaponData.Ammo)
 
 	local dir = direction.Unit
-	local velocity = dir * weaponDef.LaunchForce + Vector3.new(0, weaponDef.LaunchForce * 0.4, 0)
+	-- Gentle lob: mostly forward with a small upward arc
+	local velocity = dir * weaponDef.LaunchForce + Vector3.new(0, weaponDef.LaunchForce * 0.1, 0)
 
 	local projId = self._nextProjectileId
 	self._nextProjectileId += 1
