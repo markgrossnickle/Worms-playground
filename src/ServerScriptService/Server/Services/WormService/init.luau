@@ -1168,25 +1168,15 @@ function WormService:SpawnGhost(player: Player)
 			humanoid.Health = math.huge
 
 			-- Scale down via HumanoidDescription
-			local desc = humanoid:FindFirstChildOfClass("HumanoidDescription")
-			if not desc then
-				local ok, loadedDesc = pcall(function()
-					return Players:GetHumanoidDescriptionFromUserId(player.UserId)
-				end)
-				if ok and loadedDesc then
-					desc = loadedDesc
-				end
-			end
-			if desc then
+			pcall(function()
+				local desc = humanoid:GetAppliedDescription()
 				local s = ghostConfig.AvatarScale
-				desc.HeadScale = (desc.HeadScale or 1) * s
-				desc.BodyDepthScale = (desc.BodyDepthScale or 1) * s
-				desc.BodyHeightScale = (desc.BodyHeightScale or 1) * s
-				desc.BodyWidthScale = (desc.BodyWidthScale or 1) * s
-				pcall(function()
-					humanoid:ApplyDescription(desc)
-				end)
-			end
+				desc.HeadScale = desc.HeadScale * s
+				desc.BodyDepthScale = desc.BodyDepthScale * s
+				desc.BodyHeightScale = desc.BodyHeightScale * s
+				desc.BodyWidthScale = desc.BodyWidthScale * s
+				humanoid:ApplyDescription(desc)
+			end)
 		end
 
 		-- Apply transparency and disable collisions on body parts
