@@ -1189,6 +1189,11 @@ function WormService:DespawnAllGhosts()
 		self.Client.GhostDespawned:Fire(player)
 	end
 	self._ghosts = {}
+
+	-- Clear weapon pickups when all ghosts are gone (round reset)
+	if WeaponService then
+		WeaponService:ClearAllPickups()
+	end
 end
 
 -- Client method to request ghost spawn/despawn

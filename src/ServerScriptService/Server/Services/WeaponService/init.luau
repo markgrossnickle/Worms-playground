@@ -8,6 +8,7 @@ local Workspace = game:GetService("Workspace")
 local Knit = require(ReplicatedStorage.Packages.Knit)
 local Signal = require(ReplicatedStorage.Packages.Signal)
 local WeaponConfig = require(ReplicatedStorage.Shared.WeaponConfig)
+local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 
 type WeaponType = WeaponConfig.WeaponType
 
@@ -35,6 +36,28 @@ type ProjectileData = {
 	ChargeAlpha: number?,
 }
 
+local HALF_ARENA = WormConfig.ArenaSize / 2
+local PICKUP_SPAWN_MIN = 10
+local PICKUP_SPAWN_MAX = 15
+local PICKUP_MAX_ON_MAP = 10
+local PICKUP_DESPAWN_TIME = 30
+local PICKUP_COLLECT_RADIUS = 6
+
+type WeaponPickup = {
+	Id: number,
+	WeaponType: string,
+	Position: Vector3,
+	SpawnTime: number,
+}
+
+local WEAPON_PICKUP_COLORS: { [string]: { number } } = {
+	Blaster = { 50, 180, 255 },
+	RapidFire = { 255, 220, 50 },
+	HighVoltage = { 180, 50, 255 },
+	Grenade = { 236, 140, 70 },
+	PowerShot = { 255, 80, 30 },
+}
+
 local WeaponService = Knit.CreateService({
 	Name = "WeaponService",
 	Client = {
@@ -45,6 +68,9 @@ local WeaponService = Knit.CreateService({
 		ProjectileSpawned = Knit.CreateSignal(), -- (projId, weaponType, position, velocity, size)
 		ProjectileExploded = Knit.CreateSignal(), -- (projId, position, radius)
 		ChargeStarted = Knit.CreateSignal(), -- () — tells client charge began
+		WeaponPickupSpawned = Knit.CreateSignal(), -- (id, weaponType, position, color)
+		WeaponPickupCollected = Knit.CreateSignal(), -- (id)
+		WeaponPickupDespawned = Knit.CreateSignal(), -- (id)
 	},
 
 	-- Server-side signals
@@ -55,6 +81,12 @@ local WeaponService = Knit.CreateService({
 	_projectiles = {} :: { [number]: ProjectileData },
 	_nextProjectileId = 1,
 	_chargeStarts = {} :: { [Player]: number }, -- os.clock() when charge began
+
+	-- Weapon pickups
+	_pickups = {} :: { [number]: WeaponPickup },
+	_nextPickupId = 1,
+	_lastPickupSpawn = 0,
+	_nextPickupInterval = 0,
 })
 
 --------------------------------------------------
@@ -66,6 +98,7 @@ function WeaponService:AssignRandomWeapon(player: Player)
 	local weaponType = names[math.random(1, #names)]
 	local weaponDef = WeaponConfig.Weapons[weaponType]
 
+	local isNewGhost = self._weapons[player] == nil
 	self._weapons[player] = {
 		Type = weaponType,
 		Ammo = weaponDef.Ammo,
@@ -73,6 +106,11 @@ function WeaponService:AssignRandomWeapon(player: Player)
 	self._lastShotTimestamps[player] = 0
 
 	self.Client.WeaponAssigned:Fire(player, weaponType, weaponDef.Ammo)
+
+	-- Send existing pickups to newly spawned ghost
+	if isNewGhost then
+		self:_sendExistingPickups(player)
+	end
 end
 
 function WeaponService:AssignWeapon(player: Player, weaponType: WeaponType)
@@ -81,6 +119,7 @@ function WeaponService:AssignWeapon(player: Player, weaponType: WeaponType)
 		return
 	end
 
+	local isNewGhost = self._weapons[player] == nil
 	self._weapons[player] = {
 		Type = weaponType,
 		Ammo = weaponDef.Ammo,
@@ -88,6 +127,10 @@ function WeaponService:AssignWeapon(player: Player, weaponType: WeaponType)
 	self._lastShotTimestamps[player] = 0
 
 	self.Client.WeaponAssigned:Fire(player, weaponType, weaponDef.Ammo)
+
+	if isNewGhost then
+		self:_sendExistingPickups(player)
+	end
 end
 
 function WeaponService:ClearWeapon(player: Player)
@@ -609,6 +652,129 @@ function WeaponService:_updatePowerShot(projData: ProjectileData, _dt: number)
 end
 
 --------------------------------------------------
+-- Weapon pickups (ghost-only)
+--------------------------------------------------
+
+function WeaponService:_countPickups(): number
+	local count = 0
+	for _ in self._pickups do
+		count += 1
+	end
+	return count
+end
+
+function WeaponService:_spawnPickup()
+	if self:_countPickups() >= PICKUP_MAX_ON_MAP then
+		return
+	end
+
+	local names = WeaponConfig.WeaponNames
+	local weaponType = names[math.random(1, #names)]
+	local x = math.random(-HALF_ARENA + 100, HALF_ARENA - 100)
+	local z = math.random(-HALF_ARENA + 100, HALF_ARENA - 100)
+	local position = Vector3.new(x, 3, z)
+
+	local id = self._nextPickupId
+	self._nextPickupId += 1
+
+	self._pickups[id] = {
+		Id = id,
+		WeaponType = weaponType,
+		Position = position,
+		SpawnTime = os.clock(),
+	}
+
+	local colorData = WEAPON_PICKUP_COLORS[weaponType] or { 255, 255, 255 }
+
+	-- Only fire to ghost players
+	for player, _ in self._weapons do
+		self.Client.WeaponPickupSpawned:Fire(player, id, weaponType, position, colorData)
+	end
+end
+
+function WeaponService:_despawnPickup(id: number)
+	self._pickups[id] = nil
+
+	-- Notify all ghost players
+	for player, _ in self._weapons do
+		self.Client.WeaponPickupDespawned:Fire(player, id)
+	end
+end
+
+function WeaponService:_updatePickups()
+	local now = os.clock()
+
+	-- Despawn expired pickups
+	local toRemove = {}
+	for id, pickup in self._pickups do
+		if now - pickup.SpawnTime >= PICKUP_DESPAWN_TIME then
+			table.insert(toRemove, id)
+		end
+	end
+	for _, id in toRemove do
+		self:_despawnPickup(id)
+	end
+
+	-- Spawn new pickups periodically
+	if now - self._lastPickupSpawn >= self._nextPickupInterval then
+		self._lastPickupSpawn = now
+		self._nextPickupInterval = PICKUP_SPAWN_MIN + math.random() * (PICKUP_SPAWN_MAX - PICKUP_SPAWN_MIN)
+		self:_spawnPickup()
+	end
+end
+
+function WeaponService:_tryCollectPickup(player: Player, pickupId: number)
+	local pickup = self._pickups[pickupId]
+	if not pickup then
+		return
+	end
+
+	-- Must be a ghost (have a weapon entry = is ghost with weapon)
+	local wormData = WormService:GetWormData_Server(player)
+	if wormData and wormData.State == "Alive" then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	-- Proximity check
+	if (hrp.Position - pickup.Position).Magnitude > PICKUP_COLLECT_RADIUS then
+		return
+	end
+
+	-- Assign weapon
+	self:AssignWeapon(player, pickup.WeaponType)
+
+	-- Notify all ghost clients to remove the visual
+	for otherPlayer, _ in self._weapons do
+		self.Client.WeaponPickupCollected:Fire(otherPlayer, pickupId)
+	end
+
+	self._pickups[pickupId] = nil
+end
+
+-- Send all existing pickups to a newly spawned ghost
+function WeaponService:_sendExistingPickups(player: Player)
+	for _, pickup in self._pickups do
+		local colorData = WEAPON_PICKUP_COLORS[pickup.WeaponType] or { 255, 255, 255 }
+		self.Client.WeaponPickupSpawned:Fire(player, pickup.Id, pickup.WeaponType, pickup.Position, colorData)
+	end
+end
+
+function WeaponService:ClearAllPickups()
+	for id in self._pickups do
+		self:_despawnPickup(id)
+	end
+end
+
+--------------------------------------------------
 -- Client methods
 --------------------------------------------------
 
@@ -667,6 +833,13 @@ function WeaponService.Client:ReleasePowerShot(player: Player, origin: Vector3, 
 	self.Server:_spawnPowerShot(player, origin, direction, chargeAlpha)
 end
 
+function WeaponService.Client:CollectWeaponPickup(player: Player, pickupId: number)
+	if type(pickupId) ~= "number" then
+		return
+	end
+	self.Server:_tryCollectPickup(player, pickupId)
+end
+
 function WeaponService.Client:GetWeaponData(player: Player): { Type: string, Ammo: number }?
 	return self.Server:GetWeaponData(player)
 end
@@ -688,9 +861,10 @@ function WeaponService:KnitStart()
 	TeamService = require(script.Parent.TeamService)
 	BotService = require(script.Parent.BotService)
 
-	-- Projectile update loop
+	-- Projectile + pickup update loop
 	RunService.Heartbeat:Connect(function(dt: number)
 		self:_updateProjectiles(dt)
+		self:_updatePickups()
 	end)
 end
 

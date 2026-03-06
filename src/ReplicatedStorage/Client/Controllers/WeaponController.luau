@@ -9,8 +9,15 @@ local Signal = require(ReplicatedStorage.Packages.Signal)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local WeaponConfig = require(ReplicatedStorage.Shared.WeaponConfig)
 
+local RunService = game:GetService("RunService")
+
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
+
+local PICKUP_COLLECT_RADIUS = 5
+local PICKUP_BOB_SPEED = 2
+local PICKUP_BOB_HEIGHT = 0.5
+local PICKUP_ROTATE_SPEED = 1
 
 local WeaponController = Knit.CreateController({
 	Name = "WeaponController",
@@ -30,6 +37,10 @@ local WeaponController = Knit.CreateController({
 	_holding = false, -- for auto-fire (RapidFire)
 	_charging = false, -- for PowerShot charge
 	_chargeStartTime = 0,
+
+	-- Weapon pickup visuals (client-side only)
+	_pickupVisuals = {} :: { [number]: { Part: Part, BaseY: number, WeaponType: string, Position: Vector3 } },
+	_pickupFolder = nil :: Folder?,
 })
 
 --------------------------------------------------
@@ -262,6 +273,121 @@ function WeaponController:_spawnExplosionVisual(position: Vector3, radius: numbe
 end
 
 --------------------------------------------------
+-- Weapon pickup visuals (ghost-only, client-side)
+--------------------------------------------------
+
+function WeaponController:_createPickupVisual(id: number, weaponType: string, position: Vector3, colorData: { number })
+	if not self._wormController._inGhostMode then
+		return
+	end
+
+	local folder = self._pickupFolder
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "WeaponPickups_Local"
+		folder.Parent = workspace
+		self._pickupFolder = folder
+	end
+
+	local color = Color3.fromRGB(colorData[1], colorData[2], colorData[3])
+
+	local part = Instance.new("Part")
+	part.Name = "WeaponPickup_" .. id
+	part.Shape = Enum.PartType.Ball
+	part.Size = Vector3.new(2, 2, 2)
+	part.Color = color
+	part.Material = Enum.Material.Neon
+	part.Transparency = 0.2
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Position = position
+	part.Parent = folder
+
+	-- Glow effect
+	local light = Instance.new("PointLight")
+	light.Color = color
+	light.Brightness = 2
+	light.Range = 8
+	light.Parent = part
+
+	-- Name label
+	local billboard = Instance.new("BillboardGui")
+	billboard.Size = UDim2.new(0, 100, 0, 24)
+	billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+	billboard.AlwaysOnTop = true
+	billboard.Parent = part
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = weaponType
+	label.TextColor3 = color
+	label.TextStrokeColor3 = Color3.new(0, 0, 0)
+	label.TextStrokeTransparency = 0.3
+	label.Font = Enum.Font.GothamBold
+	label.TextScaled = true
+	label.Parent = billboard
+
+	self._pickupVisuals[id] = {
+		Part = part,
+		BaseY = position.Y,
+		WeaponType = weaponType,
+		Position = position,
+	}
+end
+
+function WeaponController:_removePickupVisual(id: number)
+	local visual = self._pickupVisuals[id]
+	if visual then
+		visual.Part:Destroy()
+		self._pickupVisuals[id] = nil
+	end
+end
+
+function WeaponController:_clearAllPickupVisuals()
+	for id, visual in self._pickupVisuals do
+		visual.Part:Destroy()
+		self._pickupVisuals[id] = nil
+	end
+	if self._pickupFolder then
+		self._pickupFolder:Destroy()
+		self._pickupFolder = nil
+	end
+end
+
+function WeaponController:_updatePickupVisuals()
+	if not self._wormController._inGhostMode then
+		return
+	end
+
+	local now = os.clock()
+	local character = LocalPlayer.Character
+	local hrp = if character then character:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+
+	for id, visual in self._pickupVisuals do
+		local part = visual.Part
+		if not part.Parent then
+			self._pickupVisuals[id] = nil
+			continue
+		end
+
+		-- Bobbing animation
+		local bobOffset = math.sin(now * PICKUP_BOB_SPEED + id) * PICKUP_BOB_HEIGHT
+		part.Position = Vector3.new(visual.Position.X, visual.BaseY + bobOffset, visual.Position.Z)
+
+		-- Rotation
+		part.CFrame = CFrame.new(part.Position) * CFrame.Angles(0, now * PICKUP_ROTATE_SPEED + id, 0)
+
+		-- Auto-collect on proximity
+		if hrp and (hrp.Position - visual.Position).Magnitude < PICKUP_COLLECT_RADIUS then
+			self._weaponService:CollectWeaponPickup(id)
+		end
+	end
+end
+
+--------------------------------------------------
 -- Input
 --------------------------------------------------
 
@@ -300,11 +426,12 @@ function WeaponController:_setupInput()
 		end
 	end)
 
-	-- Auto-fire for held button (RapidFire benefits from this)
-	self._trove:Connect(game:GetService("RunService").RenderStepped, function()
+	-- Auto-fire for held button + pickup visual updates
+	self._trove:Connect(RunService.RenderStepped, function()
 		if self._holding and self._wormController._inGhostMode and self._weaponType then
 			self:TryShoot()
 		end
+		self:_updatePickupVisuals()
 	end)
 end
 
@@ -352,6 +479,23 @@ function WeaponController:_connectSignals()
 	self._trove:Add(self._weaponService.ProjectileSpawned:Connect(function() end))
 	self._trove:Add(self._weaponService.ChargeStarted:Connect(function() end))
 
+	-- Weapon pickup signals
+	self._trove:Add(
+		self._weaponService.WeaponPickupSpawned:Connect(
+			function(id: number, weaponType: string, position: Vector3, colorData: { number })
+				self:_createPickupVisual(id, weaponType, position, colorData)
+			end
+		)
+	)
+
+	self._trove:Add(self._weaponService.WeaponPickupCollected:Connect(function(id: number)
+		self:_removePickupVisual(id)
+	end))
+
+	self._trove:Add(self._weaponService.WeaponPickupDespawned:Connect(function(id: number)
+		self:_removePickupVisual(id)
+	end))
+
 	-- Clear weapon when ghost mode ends
 	self._wormController.GhostModeChanged:Connect(function(isGhost: boolean)
 		if not isGhost then
@@ -359,6 +503,7 @@ function WeaponController:_connectSignals()
 			self._ammo = 0
 			self._holding = false
 			self._charging = false
+			self:_clearAllPickupVisuals()
 			self.WeaponCleared:Fire()
 		end
 	end)
