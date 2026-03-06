@@ -25,6 +25,7 @@ local WeaponService = Knit.CreateService({
 
 	-- Server-side signals
 	WeaponHit = Signal.new(), -- (shooter: Player, targetPlayer: Player, damage: number)
+	WeaponAssignedServer = Signal.new(), -- (player: Player, weaponType: string)
 
 	_weapons = {} :: { [Player]: { Type: WeaponType, Ammo: number } },
 	_lastShotTimestamps = {} :: { [Player]: number },
@@ -46,6 +47,7 @@ function WeaponService:AssignRandomWeapon(player: Player)
 	self._lastShotTimestamps[player] = 0
 
 	self.Client.WeaponAssigned:Fire(player, weaponType, weaponDef.Ammo)
+	self.WeaponAssignedServer:Fire(player, weaponType)
 end
 
 function WeaponService:ClearWeapon(player: Player)

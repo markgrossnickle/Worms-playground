@@ -73,6 +73,7 @@ local WormService = Knit.CreateService({
 	PlayerKilled = Signal.new(),
 	PlayerDied = Signal.new(), -- Fires for ALL player deaths (name, killerName?)
 	PlayerScoreChanged = Signal.new(),
+	WormSpawnedServer = Signal.new(), -- (player: Player)
 })
 
 --------------------------------------------------
@@ -480,6 +481,7 @@ function WormService:_spawnWorm(player: Player)
 		Color = { wormData.Color.R, wormData.Color.G, wormData.Color.B },
 		Position = { spawnPos.X, spawnPos.Y, spawnPos.Z },
 	})
+	self.WormSpawnedServer:Fire(player)
 end
 
 function WormService:_killWorm(player: Player, killer: Player?, killerBotName: string?)
@@ -517,7 +519,20 @@ function WormService:_killWorm(player: Player, killer: Player?, killerBotName: s
 	end
 
 	local killerDisplayName = if killer then killer.Name elseif killerBotName then killerBotName else nil
-	self.Client.WormDied:FireAll(player.Name, killerDisplayName)
+	local deadSegments = math.floor(wormData.Segments)
+	local killerSegments = 0
+	if killer then
+		local kd = self._worms[killer]
+		if kd then
+			killerSegments = math.floor(kd.Segments)
+		end
+	elseif killerBotName then
+		local botInfo = self._botModels[killerBotName]
+		if botInfo then
+			killerSegments = botInfo.Segments
+		end
+	end
+	self.Client.WormDied:FireAll(player.Name, killerDisplayName, killerSegments, deadSegments)
 	self.PlayerDied:Fire(player, killerDisplayName)
 
 	-- Clean up character visuals

@@ -4,6 +4,20 @@
 	@server
 ]=]
 
+export type QuestState = {
+	Type: string,
+	Target: number,
+	Progress: number,
+	Completed: boolean,
+	Reward: number,
+	Description: string,
+}
+
+export type DailyQuestData = {
+	Date: string,
+	Quests: { QuestState },
+}
+
 export type PlayerData = {
 	Coins: number,
 	XP: number,
@@ -17,6 +31,7 @@ export type PlayerData = {
 		ReachedLevel5: boolean,
 		ReachedLevel10: boolean,
 	},
+	DailyQuests: DailyQuestData,
 }
 
 local playerDataTemplate: PlayerData = {
@@ -31,6 +46,10 @@ local playerDataTemplate: PlayerData = {
 		FirstPurchase = false,
 		ReachedLevel5 = false,
 		ReachedLevel10 = false,
+	},
+	DailyQuests = {
+		Date = "",
+		Quests = {},
 	},
 }
 

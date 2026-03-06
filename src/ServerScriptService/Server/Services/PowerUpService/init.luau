@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
+local Signal = require(ReplicatedStorage.Packages.Signal)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 
 local WormService -- Set in KnitStart
@@ -51,6 +52,9 @@ local PowerUpService = Knit.CreateService({
 
 	-- Freeze Ring slow debuffs: { [targetName] = { EndTime, Factor } }
 	_slowDebuffs = {} :: { [string]: { EndTime: number, Factor: number } },
+
+	-- Server-side signal for quest tracking
+	PowerUpCollectedServer = Signal.new(), -- (ownerName: string, powerUpType: string)
 })
 
 --------------------------------------------------
@@ -332,6 +336,7 @@ function PowerUpService:CollectPowerUp(ownerName: string, headPos: Vector3): boo
 			self:_removePowerUp(id)
 			self:_applyPowerUp(ownerName, powerUpType)
 			self.Client.PowerUpCollected:FireAll(ownerName, powerUpType, data.Position)
+			self.PowerUpCollectedServer:Fire(ownerName, powerUpType)
 			return true
 		end
 	end
