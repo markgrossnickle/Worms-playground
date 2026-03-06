@@ -1484,7 +1484,7 @@ function WormUIController:KnitStart()
 	-- Wire weapon toolbar signals
 	self._trove:Add(self._weaponController.WeaponAssigned:Connect(function(weaponType: string, ammo: number)
 		if self._weaponSlotLabel then
-			self._weaponSlotLabel.Text = string.upper(weaponType)
+			self._weaponSlotLabel.Text = if weaponType then string.upper(weaponType) else ""
 		end
 		self._maxAmmo = ammo
 		if self._weaponSlotAmmo then
