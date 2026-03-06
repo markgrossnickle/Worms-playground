@@ -12,6 +12,7 @@ local BotService -- Set in KnitStart
 local ShrinkZoneService -- Set in KnitStart
 local PowerUpService -- Set in KnitStart
 local CoinService -- Set in KnitStart
+local TeamService -- Set in KnitStart
 
 local PLACEMENT_REWARDS = { [1] = 100, [2] = 60, [3] = 40, [4] = 25 }
 local DEFAULT_REWARD = 10
@@ -36,9 +37,13 @@ local RoundService = Knit.CreateService({
 	_roundActive = false,
 	_eliminationOrder = {} :: { EliminationEntry },
 	_pollConnection = nil :: RBXScriptConnection?,
+<<<<<<< HEAD
 
 	-- Server-side signal for quest tracking
 	RoundEndedServer = Signal.new(), -- (results)
+=======
+	_winningTeamIndex = nil :: number?,
+>>>>>>> origin/main
 })
 
 --------------------------------------------------
@@ -48,6 +53,7 @@ local RoundService = Knit.CreateService({
 function RoundService:_startRound()
 	self._eliminationOrder = {}
 	self._roundActive = true
+	self._winningTeamIndex = nil
 
 	-- Reset game state
 	ShrinkZoneService:Reset()
@@ -60,6 +66,11 @@ function RoundService:_startRound()
 
 	-- Clear bot stats from previous round
 	BotService:ClearRoundStats()
+
+	-- Reset team assignments so teams are balanced for the new round
+	if TeamService:IsEnabled() then
+		TeamService:ClearAllMembers()
+	end
 
 	-- Spawn all current players (pcall so one failure doesn't block bot spawning)
 	for _, player in Players:GetPlayers() do
@@ -81,6 +92,17 @@ function RoundService:_startRound()
 	self:_startPollWinCondition()
 end
 
+function RoundService:_getAllAliveNames(): { string }
+	local names = {}
+	for _, player in WormService:GetAlivePlayers() do
+		table.insert(names, player.Name)
+	end
+	for _, botName in BotService:GetAliveBotNames() do
+		table.insert(names, botName)
+	end
+	return names
+end
+
 function RoundService:_startPollWinCondition()
 	if self._pollConnection then
 		task.cancel(self._pollConnection)
@@ -92,13 +114,20 @@ function RoundService:_startPollWinCondition()
 		task.wait(2)
 
 		while self._roundActive do
-			local playerAlive = WormService:GetAliveCount()
-			local botAlive = BotService:GetAliveCount()
-			local totalAlive = playerAlive + botAlive
+			local totalAlive = WormService:GetAliveCount() + BotService:GetAliveCount()
 
-			if totalAlive <= 1 then
-				self:_endRound()
-				return
+			if TeamService:IsEnabled() then
+				local aliveTeams = TeamService:GetAliveTeams(self:_getAllAliveNames())
+				if #aliveTeams <= 1 then
+					self._winningTeamIndex = if #aliveTeams == 1 then aliveTeams[1] else nil
+					self:_endRound()
+					return
+				end
+			else
+				if totalAlive <= 1 then
+					self:_endRound()
+					return
+				end
 			end
 
 			task.wait(0.5)
@@ -178,9 +207,27 @@ function RoundService:_endRound()
 		end
 	end
 
+	-- Build winning team info if team mode
+	local winningTeam = nil
+	if TeamService:IsEnabled() and self._winningTeamIndex then
+		local teams = TeamService:GetTeams()
+		local team = teams[self._winningTeamIndex]
+		if team then
+			winningTeam = {
+				TeamIndex = self._winningTeamIndex,
+				TeamName = team.Name,
+				TeamColor = { team.Color.R, team.Color.G, team.Color.B },
+			}
+		end
+	end
+
 	-- Fire round ended to all clients
+<<<<<<< HEAD
 	self.Client.RoundEnded:FireAll(results)
 	self.RoundEndedServer:Fire(results)
+=======
+	self.Client.RoundEnded:FireAll(results, winningTeam)
+>>>>>>> origin/main
 
 	-- Kill all remaining worms/bots
 	WormService:KillAllWorms()
@@ -222,6 +269,7 @@ function RoundService:KnitStart()
 	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
 	PowerUpService = require(script.Parent.PowerUpService)
 	CoinService = require(script.Parent.CoinService)
+	TeamService = require(script.Parent.TeamService)
 
 	-- Track ALL player deaths (walls, zone, and player-kills-player)
 	-- PlayerDied fires server-side for every player death
