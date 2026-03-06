@@ -15,7 +15,8 @@ type WormData = {
 	State: WormState,
 	Segments: number,
 	MaxSegments: number,
-	Direction: Vector3,
+	Direction: Vector3, -- Target direction (set by client input)
+	CurrentDirection: Vector3, -- Actual facing direction (interpolated toward Direction)
 	Boosting: boolean,
 	Color: Color3,
 	Kills: number,
@@ -29,6 +30,7 @@ local PowerUpService -- Set in KnitStart
 local ShrinkZoneService -- Set in KnitStart
 local TeamService -- Set in KnitStart
 local WeaponService -- Set in KnitStart
+local LeaderboardService -- Set in KnitStart
 
 local GHOST_FOOD_VALUE = 3 -- segments gained by eating a ghost
 local GHOST_RESPAWN_DELAY = 5 -- seconds before eaten ghost respawns
@@ -50,6 +52,9 @@ local WormService = Knit.CreateService({
 		PlayerKillsUpdated = Knit.CreateSignal(),
 		GhostSpawned = Knit.CreateSignal(),
 		GhostDespawned = Knit.CreateSignal(),
+		GhostKnockoff = Knit.CreateSignal(), -- fired to ghost player when shot off a worm
+		RiderAttached = Knit.CreateSignal(), -- fired to worm owner when ghost mounts
+		RiderDetached = Knit.CreateSignal(), -- fired to worm owner when ghost dismounts
 	},
 
 	_worms = {} :: { [Player]: WormData },
@@ -61,6 +66,11 @@ local WormService = Knit.CreateService({
 	_botModels = {} :: { [string]: { Model: Model, Segments: number } },
 	_roundActive = false,
 	_ghosts = {} :: { [Player]: Model },
+	_ghostRiders = {} :: { [string]: { [Player]: boolean } }, -- wormOwnerName -> { ridingGhostPlayer -> true }
+	_ghostKillCounts = {} :: { [Player]: number }, -- ghost knockoff kills per session
+	_rideStartTimes = {} :: { [Player]: number }, -- os.clock() when ghost started riding
+	_totalRideTimes = {} :: { [Player]: number }, -- accumulated ride seconds
+	_batchSpawning = false, -- Suppress FoodSpawned signal during bulk food creation
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -119,8 +129,8 @@ function WormService:_createArena()
 	arena.Size = Vector3.new(WormConfig.ArenaSize, 1, WormConfig.ArenaSize)
 	arena.Position = Vector3.new(0, -0.5, 0)
 	arena.Anchored = true
-	arena.Material = Enum.Material.SmoothPlastic
-	arena.Color = Color3.fromRGB(30, 30, 30)
+	arena.Material = Enum.Material.Slate
+	arena.Color = Color3.fromRGB(35, 35, 40)
 	arena.Parent = workspace
 
 	-- Boundary walls
@@ -143,6 +153,29 @@ function WormService:_createArena()
 		wall.Transparency = 0.5
 		wall.Parent = workspace
 	end
+
+	-- Configure lighting to remove reflections and default environment effects
+	local Lighting = game:GetService("Lighting")
+	Lighting.EnvironmentDiffuseScale = 0
+	Lighting.EnvironmentSpecularScale = 0
+	Lighting.GlobalShadows = true
+	Lighting.Brightness = 2
+	Lighting.ClockTime = 14
+	-- Note: Lighting.Technology is read-only from scripts; set it in Studio properties
+	-- Remove any default children (Sky, Atmosphere, Bloom, etc.)
+	for _, child in Lighting:GetChildren() do
+		child:Destroy()
+	end
+
+	-- Subtle atmosphere for depth perception in ghost first-person view
+	local atmosphere = Instance.new("Atmosphere")
+	atmosphere.Density = 0.25
+	atmosphere.Offset = 0.5
+	atmosphere.Color = Color3.fromRGB(40, 40, 50)
+	atmosphere.Decay = Color3.fromRGB(30, 30, 35)
+	atmosphere.Glare = 0
+	atmosphere.Haze = 2
+	atmosphere.Parent = Lighting
 end
 
 local function pickFoodTier()
@@ -181,13 +214,17 @@ function WormService:_spawnFood()
 	food.Parent = self._foodFolder
 
 	self._foodCount += 1
-	self.Client.FoodSpawned:FireAll(food.Position, food.Color)
+	if not self._batchSpawning then
+		self.Client.FoodSpawned:FireAll(food.Position, food.Color)
+	end
 end
 
 function WormService:_spawnFoodBatch(count: number)
+	self._batchSpawning = true
 	for _ = 1, count do
 		self:_spawnFood()
 	end
+	self._batchSpawning = false
 end
 
 function WormService:_collectSegmentPositions(model: Model): { Vector3 }
@@ -431,6 +468,7 @@ function WormService:_spawnWorm(player: Player)
 	wormData.Segments = WormConfig.InitialSegments
 	wormData.MaxSegments = WormConfig.InitialSegments
 	wormData.Direction = Vector3.new(0, 0, -1)
+	wormData.CurrentDirection = Vector3.new(0, 0, -1)
 	wormData.Boosting = false
 	wormData.Kills = 0
 
@@ -476,6 +514,15 @@ function WormService:_killWorm(player: Player, killer: Player?, killerBotName: s
 	-- Clear any active power-up
 	PowerUpService:ClearActivePowerUp(player.Name)
 
+	-- Knock off all ghost riders on this worm
+	local riders = self._ghostRiders[player.Name]
+	if riders then
+		for ghostPlayer, _ in riders do
+			self:KnockoffGhost(ghostPlayer, Vector3.new(0, 1, 0), nil)
+		end
+		self._ghostRiders[player.Name] = nil
+	end
+
 	local segmentsToDrop = math.floor(wormData.Segments * 0.7)
 	self:_dropFoodFromWorm(player, segmentsToDrop)
 
@@ -520,7 +567,13 @@ end
 -- Weapon damage (called by WeaponService)
 --------------------------------------------------
 
-function WormService:DamageWorm(player: Player, segmentsToRemove: number, attacker: Player?, knockbackImpulse: Vector3?)
+function WormService:DamageWorm(
+	player: Player,
+	segmentsToRemove: number,
+	attacker: Player?,
+	knockbackImpulse: Vector3?,
+	hitSegmentIndex: number?
+)
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
 		return
@@ -531,44 +584,70 @@ function WormService:DamageWorm(player: Player, segmentsToRemove: number, attack
 		return
 	end
 
+	local currentFloor = math.floor(wormData.Segments)
+	local actualRemoved = math.min(segmentsToRemove, currentFloor)
+	if actualRemoved <= 0 then
+		return
+	end
+
+	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+
+	-- Determine removal range
+	local removeStart: number
+	local removeEnd: number
+	if hitSegmentIndex and hitSegmentIndex >= 1 and hitSegmentIndex <= currentFloor then
+		-- Hit-point removal: remove segments starting at the hit index
+		removeStart = hitSegmentIndex
+		removeEnd = math.min(hitSegmentIndex + actualRemoved - 1, currentFloor)
+		actualRemoved = removeEnd - removeStart + 1
+	else
+		-- Tail removal (collisions, shrink zone, boost, etc.)
+		removeEnd = currentFloor
+		removeStart = currentFloor - actualRemoved + 1
+	end
+
 	-- Drop food from removed segments
-	local actualRemoved = math.min(segmentsToRemove, math.floor(wormData.Segments))
-	if actualRemoved > 0 then
-		-- Collect positions of tail segments being removed
-		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-		local dropPositions = {}
-		if segFolder then
-			local currentFloor = math.floor(wormData.Segments)
-			for i = currentFloor, currentFloor - actualRemoved + 1, -1 do
-				local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
-				if seg then
-					table.insert(dropPositions, seg.Position)
-				end
+	local dropPositions = {}
+	if segFolder then
+		for i = removeStart, removeEnd do
+			local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
+			if seg then
+				table.insert(dropPositions, seg.Position)
 			end
 		end
-		if #dropPositions > 0 then
-			self:_dropFoodAtPositions(dropPositions, actualRemoved)
-		else
-			self:_dropFoodFromWorm(player, actualRemoved)
-		end
+	end
+	if #dropPositions > 0 then
+		self:_dropFoodAtPositions(dropPositions, actualRemoved)
+	else
+		self:_dropFoodFromWorm(player, actualRemoved)
 	end
 
 	-- Remove segments
-	local prevFloor = math.floor(wormData.Segments)
-	wormData.Segments = math.max(0, wormData.Segments - segmentsToRemove)
+	wormData.Segments = math.max(0, wormData.Segments - actualRemoved)
 	local newFloor = math.floor(wormData.Segments)
 
-	-- Destroy removed segment visuals
-	if newFloor < prevFloor then
-		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-		if segFolder then
-			for i = newFloor + 1, prevFloor do
+	-- Destroy removed segment visuals and renumber remaining tail segments
+	if segFolder then
+		-- Destroy the hit segments
+		for i = removeStart, removeEnd do
+			local seg = segFolder:FindFirstChild("Segment" .. i)
+			if seg then
+				seg:Destroy()
+			end
+		end
+
+		-- Renumber: segments after removeEnd shift down to fill the gap
+		if removeEnd < currentFloor then
+			for i = removeEnd + 1, currentFloor do
 				local seg = segFolder:FindFirstChild("Segment" .. i)
 				if seg then
-					seg:Destroy()
+					seg.Name = "Segment" .. (i - actualRemoved)
 				end
 			end
 		end
+	end
+
+	if newFloor < currentFloor then
 		self.Client.WormAte:Fire(player, newFloor)
 		self.PlayerScoreChanged:Fire(player, newFloor)
 		self:_updateLeaderstats(player, newFloor)
@@ -580,7 +659,7 @@ function WormService:DamageWorm(player: Player, segmentsToRemove: number, attack
 		if hrp then
 			local newPos = hrp.Position + knockbackImpulse.Unit * (knockbackImpulse.Magnitude * 0.1)
 			newPos = Vector3.new(newPos.X, 1, newPos.Z)
-			hrp.CFrame = CFrame.new(newPos, newPos + wormData.Direction)
+			hrp.CFrame = CFrame.new(newPos, newPos + wormData.CurrentDirection)
 
 			local wormHead = character:FindFirstChild("WormHead") :: BasePart?
 			if wormHead then
@@ -882,9 +961,30 @@ function WormService:_updateMovement(player: Player, dt: number)
 	-- Handle boosting and power-up speed (larger worms move slower)
 	local sizeScale = 1 / (1 + wormData.Segments * WormConfig.SpeedScaleFactor)
 	local slowFactor = PowerUpService:GetSlowFactor(player.Name)
-	local speed = WormConfig.BaseSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(player.Name) * slowFactor
+
+	-- Ghost rider speed boost: each riding ghost adds a speed multiplier
+	local riderBoost = 1
+	local riders = self._ghostRiders[player.Name]
+	if riders then
+		local riderCount = 0
+		for _ in riders do
+			riderCount += 1
+		end
+		riderBoost =
+			math.min(1 + riderCount * WormConfig.Ghost.RiderSpeedBoostPerGhost, WormConfig.Ghost.MaxRiderSpeedBoost)
+	end
+
+	local speed = WormConfig.BaseSpeed
+		* sizeScale
+		* PowerUpService:GetSpeedMultiplier(player.Name)
+		* slowFactor
+		* riderBoost
 	if wormData.Boosting and wormData.Segments > WormConfig.MinBoostSegments then
-		speed = WormConfig.BoostSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(player.Name) * slowFactor
+		speed = WormConfig.BoostSpeed
+			* sizeScale
+			* PowerUpService:GetSpeedMultiplier(player.Name)
+			* slowFactor
+			* riderBoost
 		local prevFloor = math.floor(wormData.Segments)
 		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
 		wormData.Segments = math.max(WormConfig.MinBoostSegments, wormData.Segments - segmentsToLose)
@@ -906,8 +1006,26 @@ function WormService:_updateMovement(player: Player, dt: number)
 		end
 	end
 
+	-- Interpolate current direction toward target direction with turn rate
+	local targetDir = wormData.Direction
+	local currentDir = wormData.CurrentDirection
+	local currentAngle = math.atan2(currentDir.X, currentDir.Z)
+	local targetAngle = math.atan2(targetDir.X, targetDir.Z)
+	local angleDiff = targetAngle - currentAngle
+	-- Normalize to [-pi, pi]
+	while angleDiff > math.pi do
+		angleDiff -= 2 * math.pi
+	end
+	while angleDiff < -math.pi do
+		angleDiff += 2 * math.pi
+	end
+	local maxTurn = WormConfig.TurnRate * dt
+	local actualTurn = math.clamp(angleDiff, -maxTurn, maxTurn)
+	local newAngle = currentAngle + actualTurn
+	local dir = Vector3.new(math.sin(newAngle), 0, math.cos(newAngle))
+	wormData.CurrentDirection = dir
+
 	-- Move HRP in direction (anchored, so CFrame set is authoritative)
-	local dir = wormData.Direction
 	local move = dir * speed * dt
 	local newPos = hrp.Position + move
 	newPos = Vector3.new(newPos.X, 1, newPos.Z) -- Keep on ground
@@ -1044,36 +1162,49 @@ end
 -- Ghost mode (dead player first-person)
 --------------------------------------------------
 
-function WormService:SpawnGhost(player: Player, weaponType: string?)
-	-- Remove existing ghost if any
-	self:DespawnGhost(player)
-
-	local wormData = self._worms[player]
-	if not wormData or wormData.State == "Alive" then
+function WormService:_addGhostNameLabel(ghost: Model, playerName: string, labelColor: Color3?)
+	local head = ghost:FindFirstChild("Head")
+	local labelParent = head or ghost.PrimaryPart
+	if not labelParent then
 		return
 	end
 
-	-- Pick a spawn position near center of arena
-	local spawnPos = Vector3.new(math.random(-50, 50), 0, math.random(-50, 50))
+	local billboard = Instance.new("BillboardGui")
+	billboard.Size = UDim2.new(0, 80, 0, 20)
+	billboard.StudsOffset = Vector3.new(0, 1.5, 0)
+	billboard.AlwaysOnTop = false
+	billboard.Parent = labelParent
 
-	-- Create a tiny character model (1/3 scale)
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Size = UDim2.fromScale(1, 1)
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Text = playerName
+	nameLabel.TextColor3 = labelColor or Color3.fromRGB(180, 200, 255)
+	nameLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	nameLabel.TextStrokeTransparency = 0.5
+	nameLabel.Font = Enum.Font.GothamBold
+	nameLabel.TextScaled = true
+	nameLabel.Parent = billboard
+end
+
+function WormService:_buildFallbackGhost(player: Player, spawnPos: Vector3): (Model, Color3)
+	local ghostConfig = WormConfig.Ghost
 	local ghost = Instance.new("Model")
 	ghost.Name = player.Name .. "_Ghost"
 
 	local hrp = Instance.new("Part")
 	hrp.Name = "HumanoidRootPart"
-	hrp.Size = Vector3.new(0.67, 0.67, 0.67) -- 1/3 of normal 2x2x2
-	hrp.Transparency = 0.5
+	hrp.Size = Vector3.new(0.67, 0.67, 0.67)
+	hrp.Transparency = ghostConfig.Transparency
 	hrp.Anchored = false
 	hrp.CanCollide = true
 	hrp.Position = spawnPos + Vector3.new(0, 2, 0)
 	hrp.Parent = ghost
 	ghost.PrimaryPart = hrp
 
-	-- Ghost body (small humanoid)
 	local humanoid = Instance.new("Humanoid")
-	humanoid.WalkSpeed = 24
-	humanoid.JumpPower = 30
+	humanoid.WalkSpeed = ghostConfig.WalkSpeed
+	humanoid.JumpPower = ghostConfig.JumpPower
 	humanoid.MaxHealth = math.huge
 	humanoid.Health = math.huge
 	humanoid.Parent = ghost
@@ -1090,14 +1221,13 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 		end
 	end
 
-	-- Ghost head (small sphere)
 	local head = Instance.new("Part")
 	head.Name = "Head"
 	head.Shape = Enum.PartType.Ball
 	head.Size = Vector3.new(0.5, 0.5, 0.5)
 	head.Color = ghostColor
 	head.Material = Enum.Material.Neon
-	head.Transparency = 0.4
+	head.Transparency = ghostConfig.Transparency
 	head.CanCollide = false
 	head.Position = hrp.Position + Vector3.new(0, 0.6, 0)
 	head.Parent = ghost
@@ -1108,13 +1238,12 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 	headWeld.C0 = CFrame.new(0, 0.6, 0)
 	headWeld.Parent = head
 
-	-- Ghost torso
 	local torso = Instance.new("Part")
 	torso.Name = "Torso"
 	torso.Size = Vector3.new(0.5, 0.67, 0.33)
 	torso.Color = ghostColor
 	torso.Material = Enum.Material.Neon
-	torso.Transparency = 0.4
+	torso.Transparency = ghostConfig.Transparency
 	torso.CanCollide = false
 	torso.Position = hrp.Position
 	torso.Parent = ghost
@@ -1125,28 +1254,121 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 	torsoWeld.C0 = CFrame.new(0, 0, 0)
 	torsoWeld.Parent = torso
 
+	-- Glow light
+	local light = Instance.new("PointLight")
+	light.Brightness = ghostConfig.GlowBrightness
+	light.Range = ghostConfig.GlowRange
+	light.Color = ghostColor
+	light.Parent = head
+
+	return ghost, ghostColor
+end
+
+function WormService:SpawnGhost(player: Player, weaponType: string?)
+	-- Remove existing ghost if any
+	self:DespawnGhost(player)
+
+	local wormData = self._worms[player]
+	if not wormData or wormData.State == "Alive" then
+		return
+	end
+
+	local ghostConfig = WormConfig.Ghost
+	local spawnPos = Vector3.new(math.random(-50, 50), 0, math.random(-50, 50))
+
+	-- Determine ghost color (team color if team mode, default ghostly blue otherwise)
+	local ghostColor = Color3.fromRGB(180, 200, 255)
+	if TeamService:IsEnabled() then
+		local teamIndex = TeamService:GetTeamForMember(player.Name)
+		if teamIndex then
+			local teamColor = TeamService:GetTeamColor(teamIndex)
+			if teamColor then
+				ghostColor = teamColor
+			end
+		end
+	end
+
+	-- Try to load the player's actual avatar
+	local ghost: Model
+	local success, avatarModel = pcall(function()
+		return Players:CreateHumanoidModelFromUserId(player.UserId)
+	end)
+
+	if success and avatarModel then
+		ghost = avatarModel
+		ghost.Name = player.Name .. "_Ghost"
+
+		-- Ensure player is still in game after async load
+		if not player.Parent then
+			ghost:Destroy()
+			return
+		end
+
+		local humanoid = ghost:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.WalkSpeed = ghostConfig.WalkSpeed
+			humanoid.JumpPower = ghostConfig.JumpPower
+			humanoid.MaxHealth = math.huge
+			humanoid.Health = math.huge
+
+			-- Scale down via HumanoidDescription
+			local desc = humanoid:FindFirstChildOfClass("HumanoidDescription")
+			if not desc then
+				local ok, loadedDesc = pcall(function()
+					return Players:GetHumanoidDescriptionFromUserId(player.UserId)
+				end)
+				if ok and loadedDesc then
+					desc = loadedDesc
+				end
+			end
+			if desc then
+				local s = ghostConfig.AvatarScale
+				desc.HeadScale = (desc.HeadScale or 1) * s
+				desc.BodyDepthScale = (desc.BodyDepthScale or 1) * s
+				desc.BodyHeightScale = (desc.BodyHeightScale or 1) * s
+				desc.BodyWidthScale = (desc.BodyWidthScale or 1) * s
+				pcall(function()
+					humanoid:ApplyDescription(desc)
+				end)
+			end
+		end
+
+		-- Apply transparency and disable collisions on body parts
+		for _, part in ghost:GetDescendants() do
+			if part:IsA("BasePart") then
+				part.Transparency = math.max(part.Transparency, ghostConfig.Transparency)
+				if part.Name ~= "HumanoidRootPart" then
+					part.CanCollide = false
+				end
+			end
+		end
+
+		-- Add glow light on head
+		local head = ghost:FindFirstChild("Head")
+		if head then
+			local light = Instance.new("PointLight")
+			light.Brightness = ghostConfig.GlowBrightness
+			light.Range = ghostConfig.GlowRange
+			light.Color = ghostColor
+			light.Parent = head
+		end
+
+		-- Position the ghost
+		local hrp = ghost:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if hrp then
+			hrp.CFrame = CFrame.new(spawnPos + Vector3.new(0, 3, 0))
+		end
+	else
+		-- Fallback to minimal neon ghost
+		ghost, ghostColor = self:_buildFallbackGhost(player, spawnPos)
+	end
+
 	-- Name label above ghost
-	local billboard = Instance.new("BillboardGui")
-	billboard.Size = UDim2.new(0, 80, 0, 20)
-	billboard.StudsOffset = Vector3.new(0, 1.5, 0)
-	billboard.AlwaysOnTop = false
-	billboard.Parent = head
+	self:_addGhostNameLabel(ghost, player.Name, ghostColor)
 
-	local nameLabel = Instance.new("TextLabel")
-	nameLabel.Size = UDim2.fromScale(1, 1)
-	nameLabel.BackgroundTransparency = 1
-	nameLabel.Text = player.Name
-	nameLabel.TextColor3 = ghostColor
-	nameLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
-	nameLabel.TextStrokeTransparency = 0.5
-	nameLabel.Font = Enum.Font.GothamBold
-	nameLabel.TextScaled = true
-	nameLabel.Parent = billboard
-
-	-- Set collision group so ghosts don't collide with worms or food
-	-- We use CanCollide on individual parts instead since collision groups require PhysicsService setup
-	-- Ghost HRP collides with ground/walls (CanCollide = true)
-	-- Other parts don't collide
+	-- Tag ghost for hit detection (used by WeaponService)
+	ghost:SetAttribute("IsGhost", true)
+	ghost:SetAttribute("GhostOwner", player.Name)
 
 	ghost.Parent = workspace
 
@@ -1171,6 +1393,9 @@ end
 function WormService:DespawnGhost(player: Player)
 	local ghost = self._ghosts[player]
 	if ghost then
+		-- Flush any active ride time before cleanup
+		self:_onGrappleDetached(player)
+
 		ghost:Destroy()
 		self._ghosts[player] = nil
 
@@ -1179,21 +1404,127 @@ function WormService:DespawnGhost(player: Player)
 			WeaponService:ClearWeapon(player)
 		end
 
+		-- Clear leaderboard tracking for this ghost
+		self._ghostKillCounts[player] = nil
+		self._rideStartTimes[player] = nil
+		self._totalRideTimes[player] = nil
+
 		self.Client.GhostDespawned:Fire(player)
 	end
 end
 
 function WormService:DespawnAllGhosts()
 	for player, ghost in self._ghosts do
+		self:_onGrappleDetached(player)
 		ghost:Destroy()
 		self.Client.GhostDespawned:Fire(player)
 	end
 	self._ghosts = {}
+	self._ghostRiders = {}
+	self._ghostKillCounts = {}
+	self._rideStartTimes = {}
+	self._totalRideTimes = {}
 
 	-- Clear weapon pickups when all ghosts are gone (round reset)
 	if WeaponService then
 		WeaponService:ClearAllPickups()
 	end
+end
+
+--------------------------------------------------
+-- Ghost rider tracking
+--------------------------------------------------
+
+function WormService:_onGrappleAttached(player: Player, targetWormName: string)
+	-- Validate: player must be a ghost
+	if not self._ghosts[player] then
+		return
+	end
+	-- Validate: target worm must exist and be alive
+	local targetOwner: Player? = nil
+	for p, data in self._worms do
+		if p.Name == targetWormName and data.State == "Alive" then
+			targetOwner = p
+			break
+		end
+	end
+	if not targetOwner then
+		return
+	end
+
+	-- Remove from any previous ride first
+	self:_onGrappleDetached(player)
+
+	-- Track this rider
+	if not self._ghostRiders[targetWormName] then
+		self._ghostRiders[targetWormName] = {}
+	end
+	self._ghostRiders[targetWormName][player] = true
+
+	-- Record ride start time for leaderboard
+	self._rideStartTimes[player] = os.clock()
+
+	-- Notify the worm owner
+	self.Client.RiderAttached:Fire(targetOwner, player.Name)
+end
+
+function WormService:_onGrappleDetached(player: Player)
+	-- Find and remove from any rider table
+	for wormName, riders in self._ghostRiders do
+		if riders[player] then
+			riders[player] = nil
+
+			-- Flush ride duration to leaderboard
+			local startTime = self._rideStartTimes[player]
+			if startTime then
+				local elapsed = os.clock() - startTime
+				self._rideStartTimes[player] = nil
+				local total = (self._totalRideTimes[player] or 0) + elapsed
+				self._totalRideTimes[player] = total
+				if LeaderboardService then
+					LeaderboardService:SubmitScoreAllPeriods(player.UserId, "RideTime", math.floor(total))
+				end
+			end
+
+			-- Clean up empty table
+			if not next(riders) then
+				self._ghostRiders[wormName] = nil
+			end
+
+			-- Notify worm owner
+			for p, _ in self._worms do
+				if p.Name == wormName then
+					self.Client.RiderDetached:Fire(p, player.Name)
+					break
+				end
+			end
+			break
+		end
+	end
+end
+
+function WormService:KnockoffGhost(ghostPlayer: Player, knockbackDir: Vector3, shooterPlayer: Player?)
+	self:_onGrappleDetached(ghostPlayer)
+	self.Client.GhostKnockoff:Fire(ghostPlayer, knockbackDir)
+
+	-- Credit the shooter with a ghost kill
+	if shooterPlayer and LeaderboardService then
+		local kills = (self._ghostKillCounts[shooterPlayer] or 0) + 1
+		self._ghostKillCounts[shooterPlayer] = kills
+		LeaderboardService:SubmitScoreAllPeriods(shooterPlayer.UserId, "GhostKills", kills)
+	end
+end
+
+-- Client methods for grapple attach/detach
+function WormService.Client:GrappleAttached(player: Player, targetWormName: string)
+	if typeof(targetWormName) ~= "string" then
+		return
+	end
+	self.Server:_onGrappleAttached(player, targetWormName)
+end
+
+function WormService.Client:GrappleDetached(player: Player)
+	self.Server:_onGrappleDetached(player)
 end
 
 -- Client method to request ghost spawn/despawn
@@ -1382,6 +1713,7 @@ local function newWormData(color: Color3): WormData
 		Segments = WormConfig.InitialSegments,
 		MaxSegments = WormConfig.InitialSegments,
 		Direction = Vector3.new(0, 0, -1),
+		CurrentDirection = Vector3.new(0, 0, -1),
 		Boosting = false,
 		Color = color,
 		Kills = 0,
@@ -1397,6 +1729,7 @@ function WormService:KnitStart()
 	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
 	TeamService = require(script.Parent.TeamService)
 	WeaponService = require(script.Parent.WeaponService)
+	LeaderboardService = require(script.Parent.LeaderboardService)
 
 	self:_createArena()
 	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)
@@ -1447,6 +1780,15 @@ function WormService:KnitStart()
 		-- Clear ghost and power-ups for the leaving player
 		self:DespawnGhost(player)
 		PowerUpService:ClearActivePowerUp(player.Name)
+
+		-- Clean up any riders on this player's worm
+		local riders = self._ghostRiders[player.Name]
+		if riders then
+			for ghostPlayer, _ in riders do
+				self:KnockoffGhost(ghostPlayer, Vector3.new(0, 1, 0), nil)
+			end
+			self._ghostRiders[player.Name] = nil
+		end
 
 		self._worms[player] = nil
 

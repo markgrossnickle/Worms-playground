@@ -73,6 +73,10 @@ local WormController = Knit.CreateController({
 	_grapplePullDuration = 0.3,
 	_grapplePullStartPos = nil :: Vector3?,
 	_rideWeld = nil :: WeldConstraint?,
+
+	-- Tool slot selection (ghost mode)
+	_selectedSlot = 1 :: number, -- 1 = Grapple, 2 = Weapon
+	SelectedSlotChanged = Signal.new(), -- (slotNumber)
 })
 
 --------------------------------------------------
@@ -438,6 +442,10 @@ function WormController:_connectServerSignals()
 		end
 	end))
 
+	self._trove:Add(self._wormService.GhostKnockoff:Connect(function(knockbackDir: Vector3)
+		self:_onKnockoff(knockbackDir)
+	end))
+
 	-- Suppress Knit warnings for signals we don't directly use here
 	self._trove:Add(self._powerUpService.PowerUpSpawned:Connect(function() end))
 	self._trove:Add(self._powerUpService.PowerUpCollected:Connect(function() end))
@@ -562,6 +570,10 @@ function WormController:_enterGhostMode()
 	self._inGhostMode = true
 	self._spectateTarget = nil
 	self._spectateTargetModel = nil
+
+	-- Reset tool selection to grapple
+	self._selectedSlot = 1
+	self.SelectedSlotChanged:Fire(1)
 
 	-- Switch to first-person camera
 	Camera.CameraType = Enum.CameraType.Custom
@@ -776,6 +788,11 @@ function WormController:_attachToWorm()
 
 	self._grappleState = "RIDING"
 
+	-- Notify server for speed boost tracking
+	if self._grappleTargetName then
+		self._wormService:GrappleAttached(self._grappleTargetName)
+	end
+
 	-- Disable humanoid movement so ghost doesn't walk off
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if humanoid then
@@ -784,6 +801,11 @@ function WormController:_attachToWorm()
 end
 
 function WormController:_detachGrapple()
+	-- Notify server before cleanup if we were riding
+	if self._grappleState == "RIDING" then
+		self._wormService:GrappleDetached()
+	end
+
 	local character = LocalPlayer.Character
 
 	-- Clean weld
@@ -815,13 +837,49 @@ function WormController:_detachGrapple()
 	self._grapplePullStartPos = nil
 end
 
+function WormController:_onKnockoff(knockbackDir: Vector3)
+	if not self._inGhostMode then
+		return
+	end
+
+	-- Detach from worm
+	self:_detachGrapple()
+
+	-- Apply knockback impulse
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if hrp then
+		hrp:ApplyImpulse(knockbackDir * WormConfig.Ghost.KnockbackForce)
+	end
+
+	-- Stun: disable movement temporarily
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.WalkSpeed = 0
+		humanoid.JumpPower = 0
+		task.delay(WormConfig.Ghost.KnockoffStunDuration, function()
+			if humanoid and humanoid.Parent and self._inGhostMode then
+				humanoid.WalkSpeed = WormConfig.Ghost.WalkSpeed
+				humanoid.JumpPower = WormConfig.Ghost.JumpPower
+			end
+		end)
+	end
+end
+
 function WormController:_onGhostClick()
 	if not self._inGhostMode then
 		return
 	end
 
+	-- Only handle grapple actions when Grapple slot (1) is selected
+	if self._selectedSlot ~= 1 then
+		return
+	end
+
 	if self._grappleState == "RIDING" then
-		-- Detach
 		self:_detachGrapple()
 		return
 	end
@@ -883,6 +941,10 @@ function WormController:_setupGhostInput()
 			self:_onGhostClick()
 		elseif input.KeyCode == Enum.KeyCode.Space then
 			self:_onGhostSpace()
+		elseif input.KeyCode == Enum.KeyCode.One then
+			self:SetSelectedSlot(1)
+		elseif input.KeyCode == Enum.KeyCode.Two then
+			self:SetSelectedSlot(2)
 		end
 	end)
 end
@@ -931,6 +993,21 @@ function WormController:SetBoosting(boosting: boolean)
 	if self._wormService then
 		self._wormService:SetBoosting(boosting)
 	end
+end
+
+function WormController:SetSelectedSlot(slot: number)
+	if slot ~= 1 and slot ~= 2 then
+		return
+	end
+	if slot == self._selectedSlot then
+		return
+	end
+	self._selectedSlot = slot
+	self.SelectedSlotChanged:Fire(slot)
+end
+
+function WormController:GetSelectedSlot(): number
+	return self._selectedSlot
 end
 
 --------------------------------------------------

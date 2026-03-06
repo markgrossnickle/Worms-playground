@@ -75,6 +75,14 @@ function WeaponController:TryShoot()
 	if not self._wormController._inGhostMode then
 		return
 	end
+	-- Don't shoot while grapple is pulling toward a worm
+	if self._wormController._grappleState == "PULLING" then
+		return
+	end
+	-- Only shoot when weapon slot is selected
+	if self._wormController:GetSelectedSlot() ~= 2 then
+		return
+	end
 
 	local weaponDef = WeaponConfig.Weapons[self._weaponType]
 	if not weaponDef then
@@ -101,6 +109,15 @@ function WeaponController:TryShoot()
 	self._lastShotTime = now
 	self._ammo -= 1 -- Optimistic update
 	self.AmmoChanged:Fire(self._ammo)
+
+	-- Client-side visual: raycast to find hit point, then show tracer immediately
+	local range = weaponDef.Range
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = { LocalPlayer.Character :: Instance }
+	local rayResult = workspace:Raycast(origin, direction * range, raycastParams)
+	local hitPos = if rayResult then rayResult.Position else origin + direction * range
+	self:_spawnProjectileVisual(LocalPlayer.Name, origin, hitPos, nil)
 
 	-- Send to server
 	self._weaponService:Shoot(origin, direction)
@@ -221,23 +238,47 @@ function WeaponController:_spawnProjectileVisual(
 		tracer:Destroy()
 	end)
 
-	-- Hit flash
-	local flash = Instance.new("Part")
-	flash.Name = "HitFlash"
-	flash.Anchored = true
-	flash.CanCollide = false
-	flash.CanQuery = false
-	flash.CanTouch = false
-	flash.Shape = Enum.PartType.Ball
-	flash.Size = Vector3.new(1, 1, 1)
-	flash.Position = hitPos
-	flash.Material = Enum.Material.Neon
-	flash.Color = Color3.fromRGB(255, 255, 100)
-	flash.Transparency = 0
-	flash.Parent = workspace
+	-- Expanding explosion burst
+	local burst = Instance.new("Part")
+	burst.Name = "HitBurst"
+	burst.Anchored = true
+	burst.CanCollide = false
+	burst.CanQuery = false
+	burst.CanTouch = false
+	burst.Shape = Enum.PartType.Ball
+	burst.Size = Vector3.new(3, 3, 3)
+	burst.Position = hitPos
+	burst.Material = Enum.Material.Neon
+	burst.Color = Color3.fromRGB(255, 220, 50)
+	burst.Transparency = 0
+	burst.Parent = workspace
 
-	task.delay(0.1, function()
-		flash:Destroy()
+	-- Expanding ring effect (flat cylinder)
+	local ring = Instance.new("Part")
+	ring.Name = "HitRing"
+	ring.Anchored = true
+	ring.CanCollide = false
+	ring.CanQuery = false
+	ring.CanTouch = false
+	ring.Shape = Enum.PartType.Cylinder
+	ring.Size = Vector3.new(0.3, 3, 3)
+	ring.CFrame = CFrame.new(hitPos) * CFrame.Angles(0, 0, math.rad(90))
+	ring.Material = Enum.Material.Neon
+	ring.Color = Color3.fromRGB(255, 160, 30)
+	ring.Transparency = 0.2
+	ring.Parent = workspace
+
+	task.delay(0, function()
+		for i = 1, 8 do
+			local t = i / 8
+			burst.Size = Vector3.new(3 + t * 3, 3 + t * 3, 3 + t * 3)
+			burst.Transparency = t
+			ring.Size = Vector3.new(0.3 * (1 - t), 3 + t * 6, 3 + t * 6)
+			ring.Transparency = 0.2 + t * 0.8
+			task.wait(0.025)
+		end
+		burst:Destroy()
+		ring:Destroy()
 	end)
 end
 
@@ -403,6 +444,9 @@ function WeaponController:_setupInput()
 		if not self._weaponType then
 			return
 		end
+		if self._wormController:GetSelectedSlot() ~= 2 then
+			return
+		end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			if self._weaponType == "Grenade" then
@@ -428,7 +472,12 @@ function WeaponController:_setupInput()
 
 	-- Auto-fire for held button + pickup visual updates
 	self._trove:Connect(RunService.RenderStepped, function()
-		if self._holding and self._wormController._inGhostMode and self._weaponType then
+		if
+			self._holding
+			and self._wormController._inGhostMode
+			and self._weaponType
+			and self._wormController:GetSelectedSlot() == 2
+		then
 			self:TryShoot()
 		end
 		self:_updatePickupVisuals()
@@ -445,6 +494,8 @@ function WeaponController:_connectSignals()
 		self._ammo = ammo
 		self._lastShotTime = 0
 		self.WeaponAssigned:Fire(weaponType, ammo)
+		-- Auto-select weapon slot when a weapon is assigned
+		self._wormController:SetSelectedSlot(2)
 	end))
 
 	self._trove:Add(self._weaponService.AmmoChanged:Connect(function(ammo: number)

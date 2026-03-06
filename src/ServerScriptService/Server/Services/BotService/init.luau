@@ -17,7 +17,7 @@ local HALF_ARENA = WormConfig.ArenaSize / 2
 local MIN_RECORD_DISTANCE = 0.5
 local ENTRIES_PER_SEGMENT = math.ceil(WormConfig.SegmentSpacing / MIN_RECORD_DISTANCE)
 
-local TARGET_TOTAL_WORMS = 16
+local TARGET_TOTAL_WORMS = 24
 local FOOD_SEEK_RANGE = 30
 local POWERUP_SEEK_RANGE = 20
 local FLEE_RANGE = 20
@@ -58,7 +58,8 @@ type BotData = {
 	State: string,
 	Segments: number,
 	MaxSegments: number,
-	Direction: Vector3,
+	Direction: Vector3, -- Target direction (set by AI)
+	CurrentDirection: Vector3, -- Actual facing direction (interpolated toward Direction)
 	Boosting: boolean,
 	Color: Color3,
 	Kills: number,
@@ -271,6 +272,7 @@ function BotService:_spawnBot()
 		Segments = WormConfig.InitialSegments,
 		MaxSegments = WormConfig.InitialSegments,
 		Direction = direction,
+		CurrentDirection = direction,
 		Boosting = false,
 		Color = color,
 		Kills = 0,
@@ -651,7 +653,24 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 		botData.Boosting = false
 	end
 
-	local dir = botData.Direction
+	-- Interpolate current direction toward target direction with turn rate
+	local targetDir = botData.Direction
+	local currentDir = botData.CurrentDirection
+	local currentAngle = math.atan2(currentDir.X, currentDir.Z)
+	local targetAngle = math.atan2(targetDir.X, targetDir.Z)
+	local angleDiff = targetAngle - currentAngle
+	while angleDiff > math.pi do
+		angleDiff -= 2 * math.pi
+	end
+	while angleDiff < -math.pi do
+		angleDiff += 2 * math.pi
+	end
+	local maxTurn = WormConfig.TurnRate * dt
+	local actualTurn = math.clamp(angleDiff, -maxTurn, maxTurn)
+	local newAngle = currentAngle + actualTurn
+	local dir = Vector3.new(math.sin(newAngle), 0, math.cos(newAngle))
+	botData.CurrentDirection = dir
+
 	local move = dir * speed * dt
 	local newPos = hrp.Position + move
 	newPos = Vector3.new(newPos.X, 1, newPos.Z)

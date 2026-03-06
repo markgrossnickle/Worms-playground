@@ -46,5 +46,23 @@ return {
 				Daily = false,
 			},
 		},
+		GhostKills = {
+			Name = "Ghost Kills",
+			Periods = {
+				AllTime = true,
+				Monthly = false,
+				Weekly = true,
+				Daily = false,
+			},
+		},
+		RideTime = {
+			Name = "Ride Time",
+			Periods = {
+				AllTime = true,
+				Monthly = false,
+				Weekly = true,
+				Daily = false,
+			},
+		},
 	},
 }

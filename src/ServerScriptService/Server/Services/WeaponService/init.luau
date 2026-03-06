@@ -221,7 +221,7 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-	-- Exclude the shooter's ghost model and all food
+	-- Exclude the shooter's ghost model and all food (other ghosts are hittable)
 	local excludeList = {}
 	if player.Character then
 		table.insert(excludeList, player.Character)
@@ -229,12 +229,6 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 	local foodFolder = Workspace:FindFirstChild("Food")
 	if foodFolder then
 		table.insert(excludeList, foodFolder)
-	end
-	-- Exclude other ghost models
-	for otherPlayer, _ in self._weapons do
-		if otherPlayer ~= player and otherPlayer.Character then
-			table.insert(excludeList, otherPlayer.Character)
-		end
 	end
 	rayParams.FilterDescendantsInstances = excludeList
 
@@ -257,7 +251,18 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 					local targetWormData = WormService:GetWormData_Server(hitPlayer)
 					if targetWormData and targetWormData.State == "Alive" then
 						hitPlayerName = hitPlayer.Name
-						WormService:DamageWorm(hitPlayer, weaponDef.Damage, player, dir * weaponDef.Knockback)
+						-- Extract which segment was hit for hit-point damage
+						local hitSegmentIndex: number? = nil
+						if string.sub(hitPart.Name, 1, 7) == "Segment" then
+							hitSegmentIndex = tonumber(string.sub(hitPart.Name, 8))
+						end
+						WormService:DamageWorm(
+							hitPlayer,
+							weaponDef.Damage,
+							player,
+							dir * weaponDef.Knockback,
+							hitSegmentIndex
+						)
 						self.Client.HitConfirmed:Fire(player, hitPlayer.Name, weaponDef.Damage)
 						self.WeaponHit:Fire(player, hitPlayer, weaponDef.Damage)
 					end
@@ -270,6 +275,47 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 					hitPlayerName = hitModel.Name
 					-- Bot damage is handled differently — just report the hit
 					-- BotService can listen to WeaponHit signal if needed
+				end
+			end
+
+			-- Check if we hit another ghost
+			if not hitPlayerName and hitModel:GetAttribute("IsGhost") then
+				local ghostOwnerName = hitModel:GetAttribute("GhostOwner")
+				if ghostOwnerName and ghostOwnerName ~= player.Name then
+					hitPlayerName = ghostOwnerName .. " (ghost)"
+
+					-- Find the ghost owner player
+					local ghostOwner: Player? = nil
+					for _, p in Players:GetPlayers() do
+						if p.Name == ghostOwnerName then
+							ghostOwner = p
+							break
+						end
+					end
+
+					if ghostOwner then
+						-- Check if ghost is riding a worm
+						local isRiding = false
+						for _, riders in WormService._ghostRiders do
+							if riders[ghostOwner] then
+								isRiding = true
+								break
+							end
+						end
+
+						if isRiding then
+							-- Knock ghost off the worm
+							WormService:KnockoffGhost(ghostOwner, dir, player)
+						else
+							-- Free-roaming ghost: just apply knockback
+							local ghostHrp = hitModel:FindFirstChild("HumanoidRootPart") :: BasePart?
+							if ghostHrp then
+								ghostHrp:ApplyImpulse(dir * weaponDef.Knockback * 0.5)
+							end
+						end
+
+						self.Client.HitConfirmed:Fire(player, ghostOwnerName, 0)
+					end
 				end
 			end
 		end

@@ -2,13 +2,14 @@
 
 return {
 	-- Arena
-	ArenaSize = 2000,
+	ArenaSize = 1200,
 
 	-- Movement
 	BaseSpeed = 30,
 	BoostSpeed = 60,
 	BoostSegmentCostPerSec = 0.5,
 	MinBoostSegments = 5,
+	TurnRate = 4, -- radians per second (~230 deg/sec)
 
 	-- Segments
 	SegmentSpacing = 1.5,
@@ -16,7 +17,7 @@ return {
 	InitialSegments = 3,
 
 	-- Food
-	MaxFoodOnMap = 800,
+	MaxFoodOnMap = 400,
 	FoodValue = 1,
 	FoodTiers = {
 		{ Weight = 60, Size = 1.2, Value = 1 },
@@ -65,5 +66,19 @@ return {
 		{ Name = "Blue", Color = Color3.fromRGB(60, 100, 255) },
 		{ Name = "Green", Color = Color3.fromRGB(60, 220, 60) },
 		{ Name = "Yellow", Color = Color3.fromRGB(255, 220, 50) },
+	},
+
+	-- Ghost mode
+	Ghost = {
+		WalkSpeed = 24,
+		JumpPower = 30,
+		AvatarScale = 0.5,
+		Transparency = 0.45,
+		RiderSpeedBoostPerGhost = 0.15, -- +15% worm speed per riding ghost
+		MaxRiderSpeedBoost = 2.0, -- cap at 2x total from riders
+		KnockoffStunDuration = 1.5, -- seconds ghost is stunned after being shot off
+		KnockbackForce = 50,
+		GlowBrightness = 0.8,
+		GlowRange = 6,
 	},
 }
