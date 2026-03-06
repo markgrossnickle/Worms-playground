@@ -37,13 +37,10 @@ local RoundService = Knit.CreateService({
 	_roundActive = false,
 	_eliminationOrder = {} :: { EliminationEntry },
 	_pollConnection = nil :: RBXScriptConnection?,
-<<<<<<< HEAD
+	_winningTeamIndex = nil :: number?,
 
 	-- Server-side signal for quest tracking
 	RoundEndedServer = Signal.new(), -- (results)
-=======
-	_winningTeamIndex = nil :: number?,
->>>>>>> origin/main
 })
 
 --------------------------------------------------
@@ -222,12 +219,8 @@ function RoundService:_endRound()
 	end
 
 	-- Fire round ended to all clients
-<<<<<<< HEAD
-	self.Client.RoundEnded:FireAll(results)
-	self.RoundEndedServer:Fire(results)
-=======
 	self.Client.RoundEnded:FireAll(results, winningTeam)
->>>>>>> origin/main
+	self.RoundEndedServer:Fire(results)
 
 	-- Kill all remaining worms/bots
 	WormService:KillAllWorms()
