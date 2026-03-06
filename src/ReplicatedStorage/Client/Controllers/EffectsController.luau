@@ -91,7 +91,6 @@ local EffectsController = Knit.CreateController({
 	_vignetteFrame = nil :: ImageLabel?,
 	_hitMarkerFrame = nil :: Frame?,
 	_zoneVignetteFrame = nil :: ImageLabel?,
-	_speedLinesFrame = nil :: Frame?,
 
 	-- Power-up auras
 	_activeAuras = {} :: { [string]: { Highlight: Highlight, Emitter: ParticleEmitter? } },
@@ -164,36 +163,6 @@ function EffectsController:_buildUI()
 	zoneVignette.Parent = gui
 	self._zoneVignetteFrame = zoneVignette
 
-	-- Speed lines container
-	local speedLines = Instance.new("Frame")
-	speedLines.Name = "SpeedLines"
-	speedLines.Size = UDim2.fromScale(1, 1)
-	speedLines.Position = UDim2.fromScale(0.5, 0.5)
-	speedLines.AnchorPoint = Vector2.new(0.5, 0.5)
-	speedLines.BackgroundTransparency = 1
-	speedLines.Visible = false
-	speedLines.Parent = gui
-
-	-- Create speed line streaks around edges
-	for i = 1, 12 do
-		local angle = (i / 12) * math.pi * 2
-		local line = Instance.new("Frame")
-		line.Name = "SpeedLine" .. i
-		line.Size = UDim2.fromOffset(2, 60)
-		line.AnchorPoint = Vector2.new(0.5, 0)
-		line.BackgroundColor3 = Color3.new(1, 1, 1)
-		line.BackgroundTransparency = 0.6
-		line.BorderSizePixel = 0
-		line.Rotation = math.deg(angle) + 180
-
-		-- Position along screen edge
-		local radius = 0.45
-		local px = 0.5 + math.cos(angle) * radius
-		local py = 0.5 + math.sin(angle) * radius
-		line.Position = UDim2.fromScale(px, py)
-		line.Parent = speedLines
-	end
-	self._speedLinesFrame = speedLines
 end
 
 --------------------------------------------------
@@ -322,7 +291,7 @@ function EffectsController:_spawnFloatingText(position: Vector3, text: string, c
 end
 
 --------------------------------------------------
--- 2. Boost trail & speed lines & FOV
+-- 2. Boost trail & FOV
 --------------------------------------------------
 
 function EffectsController:_startBoostEffects()
@@ -345,10 +314,6 @@ function EffectsController:_startBoostEffects()
 		end
 	end
 
-	-- Show speed lines
-	if self._speedLinesFrame then
-		self._speedLinesFrame.Visible = true
-	end
 end
 
 function EffectsController:_stopBoostEffects()
@@ -368,10 +333,6 @@ function EffectsController:_stopBoostEffects()
 		end
 	end
 
-	-- Hide speed lines
-	if self._speedLinesFrame then
-		self._speedLinesFrame.Visible = false
-	end
 end
 
 function EffectsController:_addBoostTrail(part: BasePart)
