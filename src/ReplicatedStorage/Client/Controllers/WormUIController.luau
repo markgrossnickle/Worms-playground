@@ -2,6 +2,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
@@ -35,6 +36,7 @@ local WormUIController = Knit.CreateController({
 	_deathLabel = nil :: TextLabel?,
 	_killFeedFrame = nil :: Frame?,
 	_minimapFrame = nil :: Frame?,
+	_minimapArrow = nil :: TextLabel?,
 	_boostButton = nil :: ImageButton?,
 	_powerUpFrame = nil :: Frame?,
 	_powerUpLabel = nil :: TextLabel?,
@@ -372,6 +374,23 @@ function WormUIController:_buildMinimap(parent: ScreenGui)
 	circleStroke.Parent = shrinkCircle
 
 	self._shrinkCircle = shrinkCircle
+
+	-- Persistent player arrow (updated every frame for smooth rotation)
+	local arrow = Instance.new("TextLabel")
+	arrow.Name = "PlayerArrow"
+	arrow.Text = "\u{25B2}"
+	arrow.Size = UDim2.new(0, 22, 0, 22)
+	arrow.Position = UDim2.fromScale(0.5, 0.5)
+	arrow.AnchorPoint = Vector2.new(0.5, 0.5)
+	arrow.BackgroundTransparency = 1
+	arrow.TextColor3 = Color3.fromRGB(100, 255, 100)
+	arrow.TextSize = 22
+	arrow.Font = Enum.Font.GothamBold
+	arrow.Rotation = 0
+	arrow.BorderSizePixel = 0
+	arrow.ZIndex = 10
+	arrow.Parent = frame
+	self._minimapArrow = arrow
 
 	-- Shift minimap up on touch devices to make room for boost button
 	if UserInputService.TouchEnabled then
@@ -1133,6 +1152,35 @@ function WormUIController:_addKillFeedEntry(deadName: string, killerName: string
 	end
 end
 
+function WormUIController:_updateMinimapArrow()
+	local arrow = self._minimapArrow
+	if not arrow then
+		return
+	end
+
+	local character = LocalPlayer.Character
+	if not character then
+		arrow.Visible = false
+		return
+	end
+
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		arrow.Visible = false
+		return
+	end
+
+	arrow.Visible = true
+	local halfArena = WormConfig.ArenaSize / 2
+	local pos = hrp.Position
+	local nx = (pos.X + halfArena) / WormConfig.ArenaSize
+	local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
+	arrow.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
+
+	local dir = hrp.CFrame.LookVector
+	arrow.Rotation = math.deg(math.atan2(dir.X, -dir.Z))
+end
+
 function WormUIController:_updateMinimap()
 	local minimap = self._minimapFrame
 	if not minimap then
@@ -1148,8 +1196,12 @@ function WormUIController:_updateMinimap()
 
 	local halfArena = WormConfig.ArenaSize / 2
 
-	-- Player dots
+	-- Player dots (other players only; local player arrow is updated per-frame)
 	for _, player in Players:GetPlayers() do
+		if player == LocalPlayer then
+			continue
+		end
+
 		local character = player.Character
 		if not character then
 			continue
@@ -1164,42 +1216,18 @@ function WormUIController:_updateMinimap()
 		local nx = (pos.X + halfArena) / WormConfig.ArenaSize
 		local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
 
-		if player == LocalPlayer then
-			-- Triangle arrow showing actual heading direction (use model CFrame, not target direction)
-			local dir = Vector3.new(0, 0, -1)
-			local hrpLocal = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-			if hrpLocal then
-				dir = hrpLocal.CFrame.LookVector
-			end
-			local angle = math.deg(math.atan2(dir.X, -dir.Z))
+		local dot = Instance.new("Frame")
+		dot.Name = "Dot"
+		dot.Size = UDim2.new(0, 6, 0, 6)
+		dot.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
+		dot.AnchorPoint = Vector2.new(0.5, 0.5)
+		dot.BorderSizePixel = 0
+		dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+		dot.Parent = minimap
 
-			local arrow = Instance.new("TextLabel")
-			arrow.Name = "Dot"
-			arrow.Text = "\u{25B2}"
-			arrow.Size = UDim2.new(0, 22, 0, 22)
-			arrow.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
-			arrow.AnchorPoint = Vector2.new(0.5, 0.5)
-			arrow.BackgroundTransparency = 1
-			arrow.TextColor3 = Color3.fromRGB(100, 255, 100)
-			arrow.TextSize = 22
-			arrow.Font = Enum.Font.GothamBold
-			arrow.Rotation = angle
-			arrow.BorderSizePixel = 0
-			arrow.Parent = minimap
-		else
-			local dot = Instance.new("Frame")
-			dot.Name = "Dot"
-			dot.Size = UDim2.new(0, 6, 0, 6)
-			dot.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
-			dot.AnchorPoint = Vector2.new(0.5, 0.5)
-			dot.BorderSizePixel = 0
-			dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
-			dot.Parent = minimap
-
-			local dotCorner = Instance.new("UICorner")
-			dotCorner.CornerRadius = UDim.new(1, 0)
-			dotCorner.Parent = dot
-		end
+		local dotCorner = Instance.new("UICorner")
+		dotCorner.CornerRadius = UDim.new(1, 0)
+		dotCorner.Parent = dot
 	end
 
 	-- Power-up dots on minimap
@@ -1551,7 +1579,12 @@ function WormUIController:KnitStart()
 		self:_showZoneWarning(msg)
 	end))
 
-	-- Periodic minimap + power-up timer updates
+	-- Per-frame minimap arrow rotation
+	self._trove:Connect(RunService.RenderStepped, function()
+		self:_updateMinimapArrow()
+	end)
+
+	-- Periodic minimap dots + power-up timer updates
 	self._trove:Add(task.spawn(function()
 		while true do
 			self:_updateMinimap()
