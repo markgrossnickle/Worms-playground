@@ -13,54 +13,54 @@ local LocalPlayer = Players.LocalPlayer
 
 --------------------------------------------------
 -- Sound ID catalog
--- Using placeholder IDs (rbxassetid://0) — swap with real asset IDs
+-- Sound asset IDs from Roblox Creator Store (some may need swapping if private)
 --------------------------------------------------
 
 local SoundIds = {
 	-- Food / eating
-	FoodEaten = "rbxassetid://0", -- soft pop/crunch
+	FoodEaten = "rbxassetid://4607031412", -- soft pop
 	-- Boost
-	BoostLoop = "rbxassetid://0", -- whoosh/acceleration loop
-	BoostEnd = "rbxassetid://0", -- deceleration wind-down
+	BoostLoop = "rbxassetid://858508159", -- fast wind whoosh
+	BoostEnd = "rbxassetid://2235655773", -- swoosh wind-down
 	-- Death / kill
-	PlayerDeath = "rbxassetid://0", -- dramatic explosion/splat
-	KillConfirmed = "rbxassetid://0", -- satisfying ding/chime
+	PlayerDeath = "rbxassetid://1540443426", -- splat
+	KillConfirmed = "rbxassetid://7128958209", -- bell ding
 	-- Power-ups
-	PowerUpCollected = "rbxassetid://0", -- magical pickup chime (default)
-	PowerUpCollected_SPEED = "rbxassetid://0", -- speed whoosh
-	PowerUpCollected_SPEED_BURST = "rbxassetid://0", -- intense speed burst
-	PowerUpCollected_MAGNET = "rbxassetid://0", -- magnetic hum
-	PowerUpCollected_GHOST = "rbxassetid://0", -- ethereal whisper
-	PowerUpCollected_SHIELD = "rbxassetid://0", -- shield clang
-	PowerUpCollected_SIZE_BOMB = "rbxassetid://0", -- heavy thump
-	PowerUpCollected_FREEZE_RING = "rbxassetid://0", -- ice crack
-	PowerUpExpired = "rbxassetid://0", -- subtle fade
+	PowerUpCollected = "rbxassetid://3292075199", -- sparkle chime
+	PowerUpCollected_SPEED = "rbxassetid://12222095", -- rocket whoosh
+	PowerUpCollected_SPEED_BURST = "rbxassetid://12222095", -- rocket whoosh (intense)
+	PowerUpCollected_MAGNET = "rbxassetid://668979958", -- generator hum
+	PowerUpCollected_GHOST = "rbxassetid://130976109", -- ethereal whisper
+	PowerUpCollected_SHIELD = "rbxassetid://175215014", -- metal clang
+	PowerUpCollected_SIZE_BOMB = "rbxassetid://137977694", -- heavy thump
+	PowerUpCollected_FREEZE_RING = "rbxassetid://747238556", -- ice crack
+	PowerUpExpired = "rbxassetid://9062831551", -- power fade
 	-- Weapons
-	WeaponFire_Blaster = "rbxassetid://0", -- laser zap
-	WeaponFire_RapidFire = "rbxassetid://0", -- rapid pops
-	WeaponFire_HighVoltage = "rbxassetid://0", -- heavy boom
-	WeaponFire_Grenade = "rbxassetid://0", -- grenade thunk
-	WeaponFire_PowerShot = "rbxassetid://0", -- charge-up whine then blast
-	GrenadeBounce = "rbxassetid://0", -- metallic clink
-	Explosion = "rbxassetid://0", -- big boom with reverb
-	WeaponPickup = "rbxassetid://0", -- item pickup chime
+	WeaponFire_Blaster = "rbxassetid://207825136", -- laser zap
+	WeaponFire_RapidFire = "rbxassetid://1585183374", -- rapid pops
+	WeaponFire_HighVoltage = "rbxassetid://186130717", -- electric shock
+	WeaponFire_Grenade = "rbxassetid://608600954", -- throw thunk
+	WeaponFire_PowerShot = "rbxassetid://3820883381", -- beam laser blast
+	GrenadeBounce = "rbxassetid://1621591319", -- metallic clink
+	Explosion = "rbxassetid://3636730677", -- big boom
+	WeaponPickup = "rbxassetid://5437842453", -- item pickup chime
 	-- Zone
-	ZoneWarning = "rbxassetid://0", -- alarm siren, escalating
+	ZoneWarning = "rbxassetid://9081144733", -- alarm siren
 	-- Round
-	CountdownTick = "rbxassetid://0", -- tick each second
-	RoundStart = "rbxassetid://0", -- horn/bell
-	RoundVictory = "rbxassetid://0", -- fanfare
-	RoundDefeat = "rbxassetid://0", -- sad trombone
+	CountdownTick = "rbxassetid://8966275754", -- clock tick
+	RoundStart = "rbxassetid://172747495", -- air horn
+	RoundVictory = "rbxassetid://1507116849", -- victory fanfare
+	RoundDefeat = "rbxassetid://840996075", -- fail trombone
 	-- Ghost
-	GhostSpawn = "rbxassetid://0", -- ethereal whoosh
-	GhostEaten = "rbxassetid://0", -- crunch + yelp
+	GhostSpawn = "rbxassetid://236989198", -- ethereal spawn
+	GhostEaten = "rbxassetid://955389133", -- crunch
 	-- Proximity
-	NearMiss = "rbxassetid://0", -- tension hum
+	NearMiss = "rbxassetid://624706518", -- whoosh
 	-- Music tracks
-	MusicLobby = "rbxassetid://0", -- lobby/countdown music
-	MusicGameplay = "rbxassetid://0", -- main gameplay loop
-	MusicFinalThree = "rbxassetid://0", -- intense final-3 music
-	MusicScoreboard = "rbxassetid://0", -- scoreboard/results music
+	MusicLobby = "rbxassetid://1848354536", -- relaxed scene
+	MusicGameplay = "rbxassetid://1842976958", -- arcade weekend
+	MusicFinalThree = "rbxassetid://1839703786", -- intense motivation
+	MusicScoreboard = "rbxassetid://1844272089", -- positive calm
 }
 
 --------------------------------------------------
