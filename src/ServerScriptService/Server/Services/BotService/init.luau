@@ -374,6 +374,43 @@ function BotService:_killBot(botName: string, killerName: string?)
 	self.BotKilled:Fire(botName, killerName)
 end
 
+function BotService:DamageBot(botName: string, segmentsToRemove: number, killerName: string?)
+	local botData = self._bots[botName]
+	if not botData or botData.State ~= "Alive" then
+		return
+	end
+
+	local model = botData.Model
+	local prevFloor = math.floor(botData.Segments)
+	botData.Segments = math.max(0, botData.Segments - segmentsToRemove)
+	local newFloor = math.floor(botData.Segments)
+
+	-- Drop food from removed segments
+	local actualRemoved = prevFloor - newFloor
+	if actualRemoved > 0 then
+		WormService:DropFoodFromModel(model, actualRemoved)
+	end
+
+	-- Destroy removed segment visuals
+	if newFloor < prevFloor then
+		local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+		if segFolder then
+			for i = newFloor + 1, prevFloor do
+				local seg = segFolder:FindFirstChild("Segment" .. i)
+				if seg then
+					seg:Destroy()
+				end
+			end
+		end
+		WormService:UpdateBotSegments(botName, newFloor)
+	end
+
+	-- Kill if segments reach 0
+	if botData.Segments <= 0 then
+		self:_killBot(botName, killerName)
+	end
+end
+
 --------------------------------------------------
 -- AI decision making
 --------------------------------------------------
