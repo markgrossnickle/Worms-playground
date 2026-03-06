@@ -1325,7 +1325,12 @@ function WormUIController:KnitStart()
 	self._trove:Add(
 		self._wormController.WormDied:Connect(
 			function(deathInfo: { KillerName: string?, MaxSegments: number, Kills: number })
-				self:_showDeathScreen(deathInfo)
+				-- Delay showing death screen so DeathCamController can play first
+				task.delay(3.0, function()
+					if not self._wormController:IsAlive() and not self._wormController._inGhostMode then
+						self:_showDeathScreen(deathInfo)
+					end
+				end)
 			end
 		)
 	)

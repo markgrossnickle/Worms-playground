@@ -33,6 +33,7 @@ local WormController = Knit.CreateController({
 	RoundCountdown = Signal.new(),
 	RoundStarted = Signal.new(),
 	SpectateChanged = Signal.new(),
+	KillConfirmed = Signal.new(),
 
 	_trove = nil :: any,
 	_wormService = nil :: any,
@@ -52,10 +53,15 @@ local WormController = Knit.CreateController({
 	_spectateTargetModel = nil :: Model?,
 	_spectatePlayers = {} :: { string },
 	_spectateIndex = 0,
+	_freeCamActive = false,
+	_freeCamCFrame = CFrame.new(),
+	FreeCamChanged = Signal.new(),
 
 	-- Per-round stat tracking
 	_peakSegments = WormConfig.InitialSegments,
 	_kills = 0,
+	_spawnTime = 0,
+	_lastDeathPosition = nil :: Vector3?,
 
 	-- Ghost mode state
 	_inGhostMode = false,
@@ -235,6 +241,52 @@ function WormController:_autoSpectate()
 	end)
 end
 
+function WormController:ToggleFreeCam()
+	if self._alive or self._inGhostMode then
+		return
+	end
+	self._freeCamActive = not self._freeCamActive
+	if self._freeCamActive then
+		self._freeCamCFrame = Camera.CFrame
+		self._spectateTargetModel = nil
+	end
+	self.FreeCamChanged:Fire(self._freeCamActive)
+end
+
+function WormController:_updateFreeCam(dt: number)
+	local speed = 100
+	local move = Vector3.zero
+	if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+		move += Camera.CFrame.LookVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+		move -= Camera.CFrame.LookVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+		move -= Camera.CFrame.RightVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+		move += Camera.CFrame.RightVector
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.E) then
+		move += Vector3.new(0, 1, 0)
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.Q) then
+		move -= Vector3.new(0, 1, 0)
+	end
+	if move.Magnitude > 0 then
+		move = move.Unit * speed * dt
+	end
+
+	local delta = UserInputService:GetMouseDelta()
+	local rotX = math.rad(-delta.X * 0.3)
+	local rotY = math.rad(-delta.Y * 0.3)
+
+	self._freeCamCFrame = self._freeCamCFrame + move
+	self._freeCamCFrame = self._freeCamCFrame * CFrame.Angles(rotY, rotX, 0)
+	Camera.CFrame = self._freeCamCFrame
+end
+
 --------------------------------------------------
 -- Input
 --------------------------------------------------
@@ -304,6 +356,24 @@ function WormController:_setupInput()
 		end
 	end)
 
+	-- Spectate/free-cam keybinds (only when dead, not in ghost mode)
+	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
+		if processed or self._alive or self._inGhostMode then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.Left then
+			if not self._freeCamActive then
+				self:CycleSpectate(-1)
+			end
+		elseif input.KeyCode == Enum.KeyCode.Right then
+			if not self._freeCamActive then
+				self:CycleSpectate(1)
+			end
+		elseif input.KeyCode == Enum.KeyCode.V then
+			self:ToggleFreeCam()
+		end
+	end)
+
 	-- Touch direction tracking: update position on touch start, move, and clear on end
 	if self._isTouchDevice then
 		self._trove:Connect(UserInputService.TouchStarted, function(touch: InputObject, processed: boolean)
@@ -330,7 +400,7 @@ end
 -- Render loop
 --------------------------------------------------
 
-function WormController:_onRenderStep()
+function WormController:_onRenderStep(dt: number)
 	if self._alive then
 		-- Send direction to server
 		local dir = self:_getWorldDirection()
@@ -342,6 +412,8 @@ function WormController:_onRenderStep()
 		self:_updateCamera()
 	elseif self._inGhostMode then
 		self:_updateGhostGrapple()
+	elseif self._freeCamActive then
+		self:_updateFreeCam(dt)
 	elseif self._spectateTargetModel then
 		self:_updateSpectateCamera()
 	end
@@ -362,6 +434,9 @@ function WormController:_connectServerSignals()
 				self._segments = data.Segments
 				self._peakSegments = data.Segments
 				self._kills = 0
+				self._spawnTime = os.clock()
+				self._lastDeathPosition = nil
+				self._freeCamActive = false
 				self._spectateTarget = nil
 				self._spectateTargetModel = nil
 				self:_setupCamera()
@@ -370,17 +445,38 @@ function WormController:_connectServerSignals()
 		)
 	)
 
-	self._trove:Add(self._wormService.WormDied:Connect(function(deadName: string, killerName: string?)
-		if deadName == LocalPlayer.Name then
-			self._alive = false
-			self.WormDied:Fire({
-				KillerName = killerName,
-				MaxSegments = math.floor(self._peakSegments),
-				Kills = self._kills,
-			})
-			self:_autoSpectate()
-		end
-	end))
+	self._trove:Add(
+		self._wormService.WormDied:Connect(
+			function(deadName: string, killerName: string?, killerSegments: number?, deadSegments: number?)
+				if deadName == LocalPlayer.Name then
+					local deathPos = Vector3.zero
+					local character = LocalPlayer.Character
+					if character then
+						local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+						if hrp then
+							deathPos = hrp.Position
+						end
+					end
+					self._lastDeathPosition = deathPos
+
+					local survivalTime = math.floor(os.clock() - self._spawnTime)
+					self._alive = false
+					self._freeCamActive = false
+					self.WormDied:Fire({
+						KillerName = killerName,
+						KillerSegments = killerSegments or 0,
+						MaxSegments = math.floor(self._peakSegments),
+						Kills = self._kills,
+						SurvivalTime = survivalTime,
+						DeathPosition = deathPos,
+					})
+					self:_autoSpectate()
+				elseif killerName == LocalPlayer.Name then
+					self.KillConfirmed:Fire(deadName, deadSegments or 0)
+				end
+			end
+		)
+	)
 
 	self._trove:Add(self._wormService.WormAte:Connect(function(newSegments: number)
 		self._segments = newSegments
@@ -568,6 +664,7 @@ end
 
 function WormController:_enterGhostMode()
 	self._inGhostMode = true
+	self._freeCamActive = false
 	self._spectateTarget = nil
 	self._spectateTargetModel = nil
 
@@ -984,6 +1081,28 @@ function WormController:IsAlive(): boolean
 	return self._alive
 end
 
+function WormController:IsFreeCamActive(): boolean
+	return self._freeCamActive
+end
+
+function WormController:GetAliveCount(): number
+	local count = 0
+	for _, child in workspace:GetChildren() do
+		if child:IsA("Model") and child:FindFirstChild("WormHead") then
+			count += 1
+		end
+	end
+	return count
+end
+
+function WormController:GetSpectateTarget(): string?
+	return self._spectateTarget
+end
+
+function WormController:GetLastDeathPosition(): Vector3?
+	return self._lastDeathPosition
+end
+
 function WormController:IsBoosting(): boolean
 	return self._boosting
 end
@@ -1048,8 +1167,8 @@ function WormController:KnitStart()
 		self:_enterGhostMode()
 	end
 
-	self._trove:Add(RunService.RenderStepped:Connect(function()
-		self:_onRenderStep()
+	self._trove:Add(RunService.RenderStepped:Connect(function(dt: number)
+		self:_onRenderStep(dt)
 	end))
 end
 
