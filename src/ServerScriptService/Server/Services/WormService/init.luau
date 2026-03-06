@@ -24,6 +24,7 @@ type WormData = {
 	HistoryStart: number,
 	HistoryEnd: number,
 	LastRecordedPos: Vector3,
+	SpawnTime: number,
 }
 
 local PowerUpService -- Set in KnitStart
@@ -36,6 +37,7 @@ local GHOST_FOOD_VALUE = 3 -- segments gained by eating a ghost
 local GHOST_RESPAWN_DELAY = 5 -- seconds before eaten ghost respawns
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
+local SPAWN_GRACE_PERIOD = 3 -- seconds of zone immunity after spawning
 
 -- Position history: record a position every MIN_RECORD_DISTANCE studs.
 -- Each segment reads ENTRIES_PER_SEGMENT entries behind the head in the buffer.
@@ -83,8 +85,13 @@ local WormService = Knit.CreateService({
 --------------------------------------------------
 
 function WormService:_randomArenaPosition(): Vector3
-	local x = math.random(-HALF_ARENA, HALF_ARENA)
-	local z = math.random(-HALF_ARENA, HALF_ARENA)
+	-- Spawn within a circle (not square) so players don't land outside the zone
+	local margin = 50
+	local maxRadius = HALF_ARENA - margin
+	local angle = math.random() * math.pi * 2
+	local dist = math.sqrt(math.random()) * maxRadius -- sqrt for uniform distribution
+	local x = math.cos(angle) * dist
+	local z = math.sin(angle) * dist
 	return Vector3.new(x, 1, z)
 end
 
@@ -471,6 +478,7 @@ function WormService:_spawnWorm(player: Player)
 	wormData.CurrentDirection = Vector3.new(0, 0, -1)
 	wormData.Boosting = false
 	wormData.Kills = 0
+	wormData.SpawnTime = os.clock()
 
 	-- Respawn character at random arena position
 	local spawnPos = self:_randomArenaPosition()
@@ -824,13 +832,18 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 end
 
 function WormService:_checkBounds(player: Player, headPos: Vector3)
-	-- Static arena wall check
+	-- Static arena wall check (always lethal, no grace)
 	if math.abs(headPos.X) > HALF_ARENA or math.abs(headPos.Z) > HALF_ARENA then
 		self:_killWorm(player, nil)
 		return
 	end
 
-	-- Shrink zone check
+	-- Shrink zone check — skip during spawn grace period
+	local wormData = self._worms[player]
+	if wormData and wormData.SpawnTime and (os.clock() - wormData.SpawnTime) < SPAWN_GRACE_PERIOD then
+		return
+	end
+
 	if ShrinkZoneService:IsOutsideZone(headPos) then
 		self:_killWorm(player, nil)
 	end
@@ -1724,6 +1737,7 @@ local function newWormData(color: Color3): WormData
 		HistoryStart = 1,
 		HistoryEnd = 0,
 		LastRecordedPos = Vector3.zero,
+		SpawnTime = 0,
 	}
 end
 

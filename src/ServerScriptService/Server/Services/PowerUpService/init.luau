@@ -58,9 +58,13 @@ local PowerUpService = Knit.CreateService({
 --------------------------------------------------
 
 local function randomArenaPosition(): Vector3
+	-- Spawn within a circle (not square) so power-ups stay inside the zone
 	local margin = 100
-	local x = math.random(-HALF_ARENA + margin, HALF_ARENA - margin)
-	local z = math.random(-HALF_ARENA + margin, HALF_ARENA - margin)
+	local maxRadius = HALF_ARENA - margin
+	local angle = math.random() * math.pi * 2
+	local dist = math.sqrt(math.random()) * maxRadius
+	local x = math.cos(angle) * dist
+	local z = math.sin(angle) * dist
 	return Vector3.new(x, 1, z)
 end
 

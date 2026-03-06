@@ -88,8 +88,13 @@ local BotService = Knit.CreateService({
 --------------------------------------------------
 
 local function randomArenaPosition(): Vector3
-	local x = math.random(-HALF_ARENA + 50, HALF_ARENA - 50)
-	local z = math.random(-HALF_ARENA + 50, HALF_ARENA - 50)
+	-- Spawn within a circle (not square) so bots don't land outside the zone
+	local margin = 50
+	local maxRadius = HALF_ARENA - margin
+	local angle = math.random() * math.pi * 2
+	local dist = math.sqrt(math.random()) * maxRadius
+	local x = math.cos(angle) * dist
+	local z = math.sin(angle) * dist
 	return Vector3.new(x, 1, z)
 end
 
