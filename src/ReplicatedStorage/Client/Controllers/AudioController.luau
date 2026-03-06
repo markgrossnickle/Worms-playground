@@ -103,6 +103,18 @@ local AudioController = Knit.CreateController({
 })
 
 --------------------------------------------------
+-- Safe signal connection helper
+--------------------------------------------------
+
+local function safeConnect(trove: any, signal: any, signalName: string, callback: (...any) -> ())
+	if signal then
+		trove:Add(signal:Connect(callback))
+	else
+		warn("[AudioController] Signal is nil: " .. signalName)
+	end
+end
+
+--------------------------------------------------
 -- Sound creation helpers
 --------------------------------------------------
 
@@ -418,14 +430,23 @@ function AudioController:_connectWormSignals()
 	local wormService = self._wormService
 	local wormController = self._wormController
 
+	if not wormService then
+		warn("[AudioController] WormService is nil, skipping worm signal connections")
+		return
+	end
+	if not wormController then
+		warn("[AudioController] WormController is nil, skipping worm signal connections")
+		return
+	end
+
 	-- Food eaten (local player only — WormAte fires for local player)
-	self._trove:Add(wormService.WormAte:Connect(function(_newSegments: number)
+	safeConnect(self._trove, wormService.WormAte, "WormService.WormAte", function(_newSegments: number)
 		local pitch = 0.9 + math.random() * 0.2 -- 0.9-1.1
 		self:_play2D("FoodEaten", SoundIds.FoodEaten, { PlaybackSpeed = pitch, Volume = 0.3 })
-	end))
+	end)
 
 	-- Worm died (anyone)
-	self._trove:Add(wormService.WormDied:Connect(function(deadName: string, killerName: string?)
+	safeConnect(self._trove, wormService.WormDied, "WormService.WormDied", function(deadName: string, killerName: string?)
 		-- Death sound
 		self:_playForEntity("PlayerDeath", SoundIds.PlayerDeath, deadName, nil, { Volume = 0.7 })
 
@@ -433,7 +454,7 @@ function AudioController:_connectWormSignals()
 		if killerName == LocalPlayer.Name and deadName ~= LocalPlayer.Name then
 			self:_play2D("KillConfirmed", SoundIds.KillConfirmed, { Volume = 0.6 })
 		end
-	end))
+	end)
 
 	-- Boost tracking
 	self._trove:Add(RunService.RenderStepped:Connect(function()
@@ -449,51 +470,65 @@ function AudioController:_connectWormSignals()
 	end))
 
 	-- Ghost spawned
-	self._trove:Add(wormService.GhostSpawned:Connect(function(_spawnPos: Vector3)
+	safeConnect(self._trove, wormService.GhostSpawned, "WormService.GhostSpawned", function(_spawnPos: Vector3)
 		self:_play2D("GhostSpawn", SoundIds.GhostSpawn, { Volume = 0.5 })
-	end))
+	end)
 
 	-- Ghost eaten by enemy worm — use GhostDespawned as a proxy
 	-- (When a ghost is despawned while in ghost mode, it was eaten)
-	self._trove:Add(wormService.GhostDespawned:Connect(function()
+	safeConnect(self._trove, wormService.GhostDespawned, "WormService.GhostDespawned", function()
 		-- The ghost was consumed — play the crunch
 		self:_play2D("GhostEaten", SoundIds.GhostEaten, { Volume = 0.5 })
-	end))
+	end)
 end
 
 function AudioController:_connectPowerUpSignals()
 	local powerUpService = self._powerUpService
 
+	if not powerUpService then
+		warn("[AudioController] PowerUpService is nil, skipping power-up signal connections")
+		return
+	end
+
 	-- Power-up collected
-	self._trove:Add(powerUpService.PowerUpCollected:Connect(function(ownerName: string, powerUpType: string, position: Vector3)
+	safeConnect(self._trove, powerUpService.PowerUpCollected, "PowerUpService.PowerUpCollected", function(ownerName: string, powerUpType: string, position: Vector3)
 		local specificId = SoundIds["PowerUpCollected_" .. powerUpType]
 		local soundId = specificId or SoundIds.PowerUpCollected
 		self:_playForEntity("PowerUpCollected", soundId, ownerName, position, { Volume = 0.5 })
-	end))
+	end)
 
 	-- Power-up expired (local player only)
-	self._trove:Add(powerUpService.PowerUpExpired:Connect(function(ownerName: string, _powerUpType: string)
+	safeConnect(self._trove, powerUpService.PowerUpExpired, "PowerUpService.PowerUpExpired", function(ownerName: string, _powerUpType: string)
 		if ownerName == LocalPlayer.Name then
 			self:_play2D("PowerUpExpired", SoundIds.PowerUpExpired, { Volume = 0.3 })
 		end
-	end))
+	end)
 end
 
 function AudioController:_connectWeaponSignals()
 	local weaponService = self._weaponService
 	local weaponController = self._weaponController
 
+	if not weaponService then
+		warn("[AudioController] WeaponService is nil, skipping weapon signal connections")
+		return
+	end
+	if not weaponController then
+		warn("[AudioController] WeaponController is nil, skipping weapon signal connections")
+		return
+	end
+
 	-- Shot replicated (other players' shots — positional audio)
-	self._trove:Add(weaponService.ShotReplicated:Connect(function(shooterName: string, origin: Vector3, _hitPos: Vector3, _hitPlayerName: string?)
+	safeConnect(self._trove, weaponService.ShotReplicated, "WeaponService.ShotReplicated", function(shooterName: string, origin: Vector3, _hitPos: Vector3, _hitPlayerName: string?)
 		if shooterName == LocalPlayer.Name then
 			return -- our own shots handled below
 		end
 		-- Determine weapon type from the shooter — default to Blaster sound
 		self:_play3D("WeaponFire", SoundIds.WeaponFire_Blaster, origin, { Volume = 0.5 })
-	end))
+	end)
 
 	-- Local player shot (via WeaponController signals)
-	self._trove:Add(weaponController.AmmoChanged:Connect(function(_ammo: number)
+	safeConnect(self._trove, weaponController.AmmoChanged, "WeaponController.AmmoChanged", function(_ammo: number)
 		local weaponType = weaponController:GetWeaponType()
 		if not weaponType then
 			return
@@ -502,42 +537,47 @@ function AudioController:_connectWeaponSignals()
 		if soundId then
 			self:_play2D("WeaponFire_" .. weaponType, soundId, { Volume = 0.5 })
 		end
-	end))
+	end)
 
 	-- Hit confirmed
-	self._trove:Add(weaponController.HitConfirmed:Connect(function(_targetName: string, _damage: number)
+	safeConnect(self._trove, weaponController.HitConfirmed, "WeaponController.HitConfirmed", function(_targetName: string, _damage: number)
 		self:_play2D("HitConfirmed", SoundIds.KillConfirmed, { Volume = 0.3, PlaybackSpeed = 1.2 })
-	end))
+	end)
 
 	-- Projectile explosion
-	self._trove:Add(weaponService.ProjectileExploded:Connect(function(_projId: number, position: Vector3, _radius: number)
+	safeConnect(self._trove, weaponService.ProjectileExploded, "WeaponService.ProjectileExploded", function(_projId: number, position: Vector3, _radius: number)
 		self:_play3D("Explosion", SoundIds.Explosion, position, { Volume = 0.8 })
-	end))
+	end)
 
 	-- Projectile spawned (grenade bounce detection is done via ProjectileSpawned)
-	self._trove:Add(weaponService.ProjectileSpawned:Connect(function(_projId: number, weaponType: string, position: Vector3, _velocity: Vector3, _size: number)
+	safeConnect(self._trove, weaponService.ProjectileSpawned, "WeaponService.ProjectileSpawned", function(_projId: number, weaponType: string, position: Vector3, _velocity: Vector3, _size: number)
 		local soundId = SoundIds["WeaponFire_" .. weaponType]
 		if soundId then
 			self:_play3D("WeaponFire_" .. weaponType, soundId, position, { Volume = 0.5 })
 		end
-	end))
+	end)
 
 	-- Weapon pickup collected
-	self._trove:Add(weaponService.WeaponPickupCollected:Connect(function(_id: number)
+	safeConnect(self._trove, weaponService.WeaponPickupCollected, "WeaponService.WeaponPickupCollected", function(_id: number)
 		self:_play2D("WeaponPickup", SoundIds.WeaponPickup, { Volume = 0.4 })
-	end))
+	end)
 
 	-- Weapon assigned (pickup)
-	self._trove:Add(weaponController.WeaponAssigned:Connect(function(_weaponType: string, _ammo: number)
+	safeConnect(self._trove, weaponController.WeaponAssigned, "WeaponController.WeaponAssigned", function(_weaponType: string, _ammo: number)
 		self:_play2D("WeaponPickup", SoundIds.WeaponPickup, { Volume = 0.4 })
-	end))
+	end)
 end
 
 function AudioController:_connectRoundSignals()
 	local roundService = self._roundService
 
+	if not roundService then
+		warn("[AudioController] RoundService is nil, skipping round signal connections")
+		return
+	end
+
 	-- Countdown tick
-	self._trove:Add(roundService.RoundCountdown:Connect(function(seconds: number)
+	safeConnect(self._trove, roundService.RoundCountdown, "RoundService.RoundCountdown", function(seconds: number)
 		if seconds <= 3 then
 			self:_play2D("CountdownTick", SoundIds.CountdownTick, { Volume = 0.6, PlaybackSpeed = if seconds == 1 then 1.2 else 1.0 })
 		else
@@ -548,16 +588,16 @@ function AudioController:_connectRoundSignals()
 		if seconds >= 8 then
 			self:_playMusic("MusicLobby")
 		end
-	end))
+	end)
 
 	-- Round started
-	self._trove:Add(roundService.RoundStarted:Connect(function()
+	safeConnect(self._trove, roundService.RoundStarted, "RoundService.RoundStarted", function()
 		self:_play2D("RoundStart", SoundIds.RoundStart, { Volume = 0.7 })
 		self:_playMusic("MusicGameplay")
-	end))
+	end)
 
 	-- Round ended
-	self._trove:Add(roundService.RoundEnded:Connect(function(results: any, _winningTeam: any)
+	safeConnect(self._trove, roundService.RoundEnded, "RoundService.RoundEnded", function(results: any, _winningTeam: any)
 		-- Check if local player won (placement 1)
 		local isWinner = false
 		if typeof(results) == "table" then
@@ -578,16 +618,21 @@ function AudioController:_connectRoundSignals()
 		end
 
 		self:_playMusic("MusicScoreboard")
-	end))
+	end)
 end
 
 function AudioController:_connectZoneSignals()
 	local shrinkZoneService = self._shrinkZoneService
 
+	if not shrinkZoneService then
+		warn("[AudioController] ShrinkZoneService is nil, skipping zone signal connections")
+		return
+	end
+
 	-- Zone warning
-	self._trove:Add(shrinkZoneService.ZoneWarning:Connect(function(_message: string)
+	safeConnect(self._trove, shrinkZoneService.ZoneWarning, "ShrinkZoneService.ZoneWarning", function(_message: string)
 		self:_play2D("ZoneWarning", SoundIds.ZoneWarning, { Volume = 0.6 })
-	end))
+	end)
 end
 
 --------------------------------------------------
