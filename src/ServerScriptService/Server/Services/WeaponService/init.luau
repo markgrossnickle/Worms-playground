@@ -273,8 +273,7 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 				local wormHead = hitModel:FindFirstChild("WormHead")
 				if (segFolder or wormHead) and not TeamService:AreTeammates(player.Name, hitModel.Name) then
 					hitPlayerName = hitModel.Name
-					-- Bot damage is handled differently — just report the hit
-					-- BotService can listen to WeaponHit signal if needed
+					BotService:DamageBot(hitModel.Name, weaponDef.Damage, player.Name)
 				end
 			end
 

@@ -1177,7 +1177,16 @@ function WormUIController:_updateMinimapArrow()
 	local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
 	arrow.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
 
-	local dir = hrp.CFrame.LookVector
+	-- In worm mode, use WormController's tracked direction (server CFrame may not
+	-- replicate rotation reliably due to network ownership). In ghost mode, HRP
+	-- LookVector is correct since the standard Humanoid handles rotation.
+	local dir
+	local WormController = Knit.GetController("WormController")
+	if WormController and WormController._alive and WormController._direction then
+		dir = WormController._direction
+	else
+		dir = hrp.CFrame.LookVector
+	end
 	arrow.Rotation = math.deg(math.atan2(dir.X, -dir.Z))
 end
 

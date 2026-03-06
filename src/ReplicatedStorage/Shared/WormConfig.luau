@@ -33,7 +33,7 @@ return {
 	-- Gameplay
 	RespawnDelay = 3,
 	CollisionRadius = 2,
-	SpeedScaleFactor = 0.02,
+	SpeedScaleFactor = 0.008,
 
 	-- Power-ups
 	PowerUpSpawnIntervalMin = 10,
