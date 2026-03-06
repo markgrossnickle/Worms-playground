@@ -9,8 +9,15 @@ local Signal = require(ReplicatedStorage.Packages.Signal)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local WeaponConfig = require(ReplicatedStorage.Shared.WeaponConfig)
 
+local RunService = game:GetService("RunService")
+
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
+
+local PICKUP_COLLECT_RADIUS = 5
+local PICKUP_BOB_SPEED = 2
+local PICKUP_BOB_HEIGHT = 0.5
+local PICKUP_ROTATE_SPEED = 1
 
 local WeaponController = Knit.CreateController({
 	Name = "WeaponController",
@@ -28,6 +35,12 @@ local WeaponController = Knit.CreateController({
 	_ammo = 0,
 	_lastShotTime = 0,
 	_holding = false, -- for auto-fire (RapidFire)
+	_charging = false, -- for PowerShot charge
+	_chargeStartTime = 0,
+
+	-- Weapon pickup visuals (client-side only)
+	_pickupVisuals = {} :: { [number]: { Part: Part, BaseY: number, WeaponType: string, Position: Vector3 } },
+	_pickupFolder = nil :: Folder?,
 })
 
 --------------------------------------------------
@@ -71,11 +84,17 @@ function WeaponController:TryShoot()
 		return
 	end
 
-	-- Client-side fire rate check
 	local weaponDef = WeaponConfig.Weapons[self._weaponType]
 	if not weaponDef then
 		return
 	end
+
+	-- Projectile weapons use different methods
+	if weaponDef.IsProjectile then
+		return
+	end
+
+	-- Client-side fire rate check
 	local minInterval = 60 / weaponDef.FireRate
 	local now = os.clock()
 	if (now - self._lastShotTime) < (minInterval - WeaponConfig.FireRateTolerance) then
@@ -102,6 +121,81 @@ function WeaponController:TryShoot()
 
 	-- Send to server
 	self._weaponService:Shoot(origin, direction)
+end
+
+function WeaponController:TryThrowGrenade()
+	if self._weaponType ~= "Grenade" then
+		return
+	end
+	if self._ammo <= 0 then
+		return
+	end
+	if not self._wormController._inGhostMode then
+		return
+	end
+
+	local weaponDef = WeaponConfig.Weapons.Grenade
+	local minInterval = 60 / weaponDef.FireRate
+	local now = os.clock()
+	if (now - self._lastShotTime) < (minInterval - WeaponConfig.FireRateTolerance) then
+		return
+	end
+
+	local origin, direction = self:_getAimRay()
+	if not origin or not direction then
+		return
+	end
+
+	self._lastShotTime = now
+	self._ammo -= 1
+	self.AmmoChanged:Fire(self._ammo)
+
+	self._weaponService:ThrowGrenade(origin, direction)
+end
+
+function WeaponController:StartPowerShotCharge()
+	if self._weaponType ~= "PowerShot" then
+		return
+	end
+	if self._ammo <= 0 then
+		return
+	end
+	if not self._wormController._inGhostMode then
+		return
+	end
+	if self._charging then
+		return
+	end
+
+	self._charging = true
+	self._chargeStartTime = os.clock()
+	self._weaponService:StartCharge()
+end
+
+function WeaponController:ReleasePowerShot()
+	if not self._charging then
+		return
+	end
+	self._charging = false
+
+	local origin, direction = self:_getAimRay()
+	if not origin or not direction then
+		return
+	end
+
+	self._ammo -= 1
+	self.AmmoChanged:Fire(self._ammo)
+
+	self._weaponService:ReleasePowerShot(origin, direction)
+end
+
+function WeaponController:GetChargeAlpha(): number
+	if not self._charging then
+		return 0
+	end
+	local weaponDef = WeaponConfig.Weapons.PowerShot
+	local elapsed = os.clock() - self._chargeStartTime
+	return math.clamp(elapsed / (weaponDef.ChargeTime :: number), 0, 1)
 end
 
 --------------------------------------------------
@@ -188,12 +282,158 @@ function WeaponController:_spawnProjectileVisual(
 	end)
 end
 
+function WeaponController:_spawnExplosionVisual(position: Vector3, radius: number)
+	-- Expanding sphere
+	local sphere = Instance.new("Part")
+	sphere.Name = "Explosion"
+	sphere.Shape = Enum.PartType.Ball
+	sphere.Anchored = true
+	sphere.CanCollide = false
+	sphere.CanQuery = false
+	sphere.CanTouch = false
+	sphere.Material = Enum.Material.Neon
+	sphere.Color = Color3.fromRGB(255, 150, 30)
+	sphere.Size = Vector3.new(1, 1, 1)
+	sphere.Position = position
+	sphere.Transparency = 0.3
+	sphere.Parent = workspace
+
+	-- Expand and fade
+	task.spawn(function()
+		local duration = 0.3
+		local steps = 10
+		for i = 1, steps do
+			local alpha = i / steps
+			local size = radius * 2 * alpha
+			sphere.Size = Vector3.new(size, size, size)
+			sphere.Transparency = 0.3 + alpha * 0.7
+			task.wait(duration / steps)
+		end
+		sphere:Destroy()
+	end)
+end
+
+--------------------------------------------------
+-- Weapon pickup visuals (ghost-only, client-side)
+--------------------------------------------------
+
+function WeaponController:_createPickupVisual(id: number, weaponType: string, position: Vector3, colorData: { number })
+	if not self._wormController._inGhostMode then
+		return
+	end
+
+	local folder = self._pickupFolder
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "WeaponPickups_Local"
+		folder.Parent = workspace
+		self._pickupFolder = folder
+	end
+
+	local color = Color3.fromRGB(colorData[1], colorData[2], colorData[3])
+
+	local part = Instance.new("Part")
+	part.Name = "WeaponPickup_" .. id
+	part.Shape = Enum.PartType.Ball
+	part.Size = Vector3.new(2, 2, 2)
+	part.Color = color
+	part.Material = Enum.Material.Neon
+	part.Transparency = 0.2
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Position = position
+	part.Parent = folder
+
+	-- Glow effect
+	local light = Instance.new("PointLight")
+	light.Color = color
+	light.Brightness = 2
+	light.Range = 8
+	light.Parent = part
+
+	-- Name label
+	local billboard = Instance.new("BillboardGui")
+	billboard.Size = UDim2.new(0, 100, 0, 24)
+	billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+	billboard.AlwaysOnTop = true
+	billboard.Parent = part
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = weaponType
+	label.TextColor3 = color
+	label.TextStrokeColor3 = Color3.new(0, 0, 0)
+	label.TextStrokeTransparency = 0.3
+	label.Font = Enum.Font.GothamBold
+	label.TextScaled = true
+	label.Parent = billboard
+
+	self._pickupVisuals[id] = {
+		Part = part,
+		BaseY = position.Y,
+		WeaponType = weaponType,
+		Position = position,
+	}
+end
+
+function WeaponController:_removePickupVisual(id: number)
+	local visual = self._pickupVisuals[id]
+	if visual then
+		visual.Part:Destroy()
+		self._pickupVisuals[id] = nil
+	end
+end
+
+function WeaponController:_clearAllPickupVisuals()
+	for id, visual in self._pickupVisuals do
+		visual.Part:Destroy()
+		self._pickupVisuals[id] = nil
+	end
+	if self._pickupFolder then
+		self._pickupFolder:Destroy()
+		self._pickupFolder = nil
+	end
+end
+
+function WeaponController:_updatePickupVisuals()
+	if not self._wormController._inGhostMode then
+		return
+	end
+
+	local now = os.clock()
+	local character = LocalPlayer.Character
+	local hrp = if character then character:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+
+	for id, visual in self._pickupVisuals do
+		local part = visual.Part
+		if not part.Parent then
+			self._pickupVisuals[id] = nil
+			continue
+		end
+
+		-- Bobbing animation
+		local bobOffset = math.sin(now * PICKUP_BOB_SPEED + id) * PICKUP_BOB_HEIGHT
+		part.Position = Vector3.new(visual.Position.X, visual.BaseY + bobOffset, visual.Position.Z)
+
+		-- Rotation
+		part.CFrame = CFrame.new(part.Position) * CFrame.Angles(0, now * PICKUP_ROTATE_SPEED + id, 0)
+
+		-- Auto-collect on proximity
+		if hrp and (hrp.Position - visual.Position).Magnitude < PICKUP_COLLECT_RADIUS then
+			self._weaponService:CollectWeaponPickup(id)
+		end
+	end
+end
+
 --------------------------------------------------
 -- Input
 --------------------------------------------------
 
 function WeaponController:_setupInput()
-	-- Mouse button for shooting (replaces grapple click when weapon is equipped)
+	-- Left click: shoot hitscan / throw grenade
 	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
 		if processed then
 			return
@@ -209,19 +449,29 @@ function WeaponController:_setupInput()
 		end
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			self._holding = true
-			self:TryShoot()
+			if self._weaponType == "Grenade" then
+				self:TryThrowGrenade()
+			elseif self._weaponType == "PowerShot" then
+				self:StartPowerShotCharge()
+			else
+				self._holding = true
+				self:TryShoot()
+			end
 		end
 	end)
 
 	self._trove:Connect(UserInputService.InputEnded, function(input: InputObject, _processed: boolean)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			self._holding = false
+			-- Release PowerShot charge on mouse up
+			if self._charging then
+				self:ReleasePowerShot()
+			end
 		end
 	end)
 
-	-- Auto-fire for held button (RapidFire benefits from this)
-	self._trove:Connect(game:GetService("RunService").RenderStepped, function()
+	-- Auto-fire for held button + pickup visual updates
+	self._trove:Connect(RunService.RenderStepped, function()
 		if
 			self._holding
 			and self._wormController._inGhostMode
@@ -230,6 +480,7 @@ function WeaponController:_setupInput()
 		then
 			self:TryShoot()
 		end
+		self:_updatePickupVisuals()
 	end)
 end
 
@@ -268,12 +519,42 @@ function WeaponController:_connectSignals()
 		)
 	)
 
+	-- Projectile explosion visual
+	self._trove:Add(
+		self._weaponService.ProjectileExploded:Connect(function(_projId: number, position: Vector3, radius: number)
+			self:_spawnExplosionVisual(position, radius)
+		end)
+	)
+
+	-- Suppress ProjectileSpawned / ChargeStarted warnings
+	self._trove:Add(self._weaponService.ProjectileSpawned:Connect(function() end))
+	self._trove:Add(self._weaponService.ChargeStarted:Connect(function() end))
+
+	-- Weapon pickup signals
+	self._trove:Add(
+		self._weaponService.WeaponPickupSpawned:Connect(
+			function(id: number, weaponType: string, position: Vector3, colorData: { number })
+				self:_createPickupVisual(id, weaponType, position, colorData)
+			end
+		)
+	)
+
+	self._trove:Add(self._weaponService.WeaponPickupCollected:Connect(function(id: number)
+		self:_removePickupVisual(id)
+	end))
+
+	self._trove:Add(self._weaponService.WeaponPickupDespawned:Connect(function(id: number)
+		self:_removePickupVisual(id)
+	end))
+
 	-- Clear weapon when ghost mode ends
 	self._wormController.GhostModeChanged:Connect(function(isGhost: boolean)
 		if not isGhost then
 			self._weaponType = nil
 			self._ammo = 0
 			self._holding = false
+			self._charging = false
+			self:_clearAllPickupVisuals()
 			self.WeaponCleared:Fire()
 		end
 	end)

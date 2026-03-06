@@ -151,8 +151,33 @@ function TeamService:GetTeamScores(
 	return scores
 end
 
+function TeamService:ClearAllMembers()
+	for _, team in self._teams do
+		table.clear(team.Members)
+	end
+	table.clear(self._memberTeam)
+end
+
 function TeamService:GetTeams(): { [number]: TeamData }
 	return self._teams
+end
+
+function TeamService:GetAliveTeams(aliveNames: { string }): { number }
+	local aliveSet: { [string]: boolean } = {}
+	for _, name in aliveNames do
+		aliveSet[name] = true
+	end
+
+	local teamsAlive: { number } = {}
+	for i, team in self._teams do
+		for _, member in team.Members do
+			if aliveSet[member] then
+				table.insert(teamsAlive, i)
+				break
+			end
+		end
+	end
+	return teamsAlive
 end
 
 --------------------------------------------------
