@@ -42,6 +42,7 @@ function ShrinkZoneService:_createRing()
 		part.Name = "Ring" .. i
 		part.Anchored = true
 		part.CanCollide = false
+		part.CanQuery = false -- Don't block weapon raycasts
 		part.Material = Enum.Material.Neon
 		part.Color = Color3.fromRGB(255, 50, 50)
 		part.Transparency = 0.4

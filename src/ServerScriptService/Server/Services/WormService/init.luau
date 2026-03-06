@@ -136,6 +136,7 @@ function WormService:_createArena()
 	arena.Size = Vector3.new(WormConfig.ArenaSize, 1, WormConfig.ArenaSize)
 	arena.Position = Vector3.new(0, -0.5, 0)
 	arena.Anchored = true
+	arena.CanQuery = false -- Don't block weapon raycasts
 	arena.Material = Enum.Material.Slate
 	arena.Color = Color3.fromRGB(35, 35, 40)
 	arena.Parent = workspace
@@ -155,6 +156,7 @@ function WormService:_createArena()
 		wall.Size = data[1]
 		wall.Position = data[2]
 		wall.Anchored = true
+		wall.CanQuery = false -- Don't block weapon raycasts
 		wall.Material = Enum.Material.SmoothPlastic
 		wall.Color = Color3.fromRGB(80, 0, 0)
 		wall.Transparency = 0.5
@@ -316,11 +318,13 @@ function WormService:_setupCharacter(player: Player, character: Model)
 
 	-- Hide all character parts EXCEPT the Head (which becomes the worm head)
 	-- Keep face decals on the Head visible
+	-- Set CanQuery = false so weapon raycasts pass through invisible parts
 	for _, desc in character:GetDescendants() do
 		if desc:IsA("BasePart") then
 			if desc ~= head then
 				desc.Transparency = 1
 				desc.CanCollide = false
+				desc.CanQuery = false
 			end
 		elseif desc:IsA("Decal") then
 			if desc.Parent ~= head then
@@ -335,6 +339,7 @@ function WormService:_setupCharacter(player: Player, character: Model)
 		if desc:IsA("BasePart") and desc.Name ~= "WormHead" and not string.match(desc.Name, "^Segment") then
 			desc.Transparency = 1
 			desc.CanCollide = false
+			desc.CanQuery = false
 		elseif desc:IsA("Decal") then
 			if desc.Parent ~= wormHead then
 				desc.Transparency = 1
@@ -1108,6 +1113,17 @@ function WormService:_gameStep(dt: number)
 		local botHrp = botInfo.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
 		if botHrp then
 			self:_checkBotGhostEating(botName, botHrp.Position)
+		end
+	end
+
+	-- Despawn ghosts that go outside arena walls
+	for player, ghost in self._ghosts do
+		local ghostHrp = ghost:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if ghostHrp then
+			local pos = ghostHrp.Position
+			if math.abs(pos.X) > HALF_ARENA or math.abs(pos.Z) > HALF_ARENA then
+				self:DespawnGhost(player)
+			end
 		end
 	end
 end

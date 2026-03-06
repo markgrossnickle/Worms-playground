@@ -121,6 +121,7 @@ function BotService:_createBotModel(name: string, color: Color3, spawnPos: Vecto
 	hrp.Transparency = 1
 	hrp.Anchored = true
 	hrp.CanCollide = false
+	hrp.CanQuery = false -- Don't block weapon raycasts
 	hrp.CFrame = CFrame.new(spawnPos)
 	hrp.Parent = model
 	model.PrimaryPart = hrp
