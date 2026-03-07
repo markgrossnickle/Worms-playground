@@ -86,6 +86,9 @@ local WormController = Knit.CreateController({
 
 	-- Power-up hiding in ghost mode
 	_powerUpHideConn = nil :: RBXScriptConnection?,
+
+	-- Gamepad state
+	_gamepadThumbstick = Vector2.zero,
 })
 
 --------------------------------------------------
@@ -295,6 +298,18 @@ end
 --------------------------------------------------
 
 function WormController:_getWorldDirection(): Vector3?
+	-- Gamepad thumbstick: convert 2D stick input to world direction
+	if self._gamepadThumbstick.Magnitude > 0.2 then
+		local camCF = Camera.CFrame
+		local forward = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z).Unit
+		local right = Vector3.new(camCF.RightVector.X, 0, camCF.RightVector.Z).Unit
+		local dir = forward * self._gamepadThumbstick.Y + right * self._gamepadThumbstick.X
+		if dir.Magnitude > 0.1 then
+			return dir.Unit
+		end
+		return nil
+	end
+
 	-- Determine screen position: use tracked touch position on mobile, mouse otherwise
 	local screenX, screenY
 	if self._isTouchDevice and self._touchPosition then
@@ -397,6 +412,47 @@ function WormController:_setupInput()
 			self._touchPosition = nil
 		end)
 	end
+
+	-- Gamepad input
+	self._trove:Connect(UserInputService.InputChanged, function(input: InputObject, _processed: boolean)
+		if input.KeyCode == Enum.KeyCode.Thumbstick1 then
+			-- Left thumbstick for movement direction (Y is inverted on Roblox)
+			self._gamepadThumbstick = Vector2.new(input.Position.X, -input.Position.Y)
+		end
+	end)
+
+	-- Gamepad boost: left trigger
+	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
+		if processed or self._inGhostMode then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonR2 or input.KeyCode == Enum.KeyCode.ButtonA then
+			self:SetBoosting(true)
+		end
+	end)
+	self._trove:Connect(UserInputService.InputEnded, function(input: InputObject, _processed: boolean)
+		if input.KeyCode == Enum.KeyCode.ButtonR2 or input.KeyCode == Enum.KeyCode.ButtonA then
+			self:SetBoosting(false)
+		end
+	end)
+
+	-- Gamepad spectate cycling: bumpers (when dead, not ghost)
+	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
+		if processed or self._alive or self._inGhostMode then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonL1 then
+			if not self._freeCamActive then
+				self:CycleSpectate(-1)
+			end
+		elseif input.KeyCode == Enum.KeyCode.ButtonR1 then
+			if not self._freeCamActive then
+				self:CycleSpectate(1)
+			end
+		elseif input.KeyCode == Enum.KeyCode.ButtonY then
+			self:ToggleFreeCam()
+		end
+	end)
 end
 
 --------------------------------------------------
@@ -1121,14 +1177,21 @@ function WormController:_setupGhostInput()
 			return
 		end
 
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if
+			input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch
+			or input.KeyCode == Enum.KeyCode.ButtonR2
+		then
 			self:_onGhostClick()
-		elseif input.KeyCode == Enum.KeyCode.Space then
+		elseif input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonB then
 			self:_onGhostSpace()
 		elseif input.KeyCode == Enum.KeyCode.One then
 			self:SetSelectedSlot(1)
 		elseif input.KeyCode == Enum.KeyCode.Two then
 			self:SetSelectedSlot(2)
+		elseif input.KeyCode == Enum.KeyCode.ButtonL1 or input.KeyCode == Enum.KeyCode.ButtonR1 then
+			-- Cycle slots with bumpers in ghost mode
+			self:SetSelectedSlot(if self._selectedSlot == 1 then 2 else 1)
 		end
 	end)
 end

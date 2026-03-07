@@ -8,6 +8,7 @@ local UserInputService = game:GetService("UserInputService")
 local Knit = require(ReplicatedStorage.Packages.Knit)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+local PlatformUtil = require(ReplicatedStorage.Shared.PlatformUtil)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -152,7 +153,7 @@ end
 function WormUIController:_buildSegmentCounter(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "SegmentCounter"
-	frame.Size = UDim2.new(0, 200, 0, 50)
+	frame.Size = UDim2.new(0.15, 0, 0, PlatformUtil.MinTouchSize(50))
 	frame.Position = UDim2.new(0.5, 0, 0, 10)
 	frame.AnchorPoint = Vector2.new(0.5, 0)
 	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -190,7 +191,7 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 	createTextLabel({
 		Name = "Title",
 		Text = "YOU DIED",
-		Size = UDim2.new(0, 400, 0, 60),
+		Size = UDim2.new(0.6, 0, 0, 60),
 		Position = UDim2.fromScale(0.5, 0.3),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		TextSize = 48,
@@ -202,7 +203,7 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 	self._deathLabel = createTextLabel({
 		Name = "Info",
 		Text = "",
-		Size = UDim2.new(0, 400, 0, 40),
+		Size = UDim2.new(0.6, 0, 0, 40),
 		Position = UDim2.fromScale(0.5, 0.38),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		TextSize = 22,
@@ -213,7 +214,7 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 	self._statsLabel = createTextLabel({
 		Name = "Stats",
 		Text = "",
-		Size = UDim2.new(0, 400, 0, 30),
+		Size = UDim2.new(0.6, 0, 0, 30),
 		Position = UDim2.fromScale(0.5, 0.45),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		TextSize = 18,
@@ -224,7 +225,7 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 	-- Spectate section
 	local spectateSection = Instance.new("Frame")
 	spectateSection.Name = "SpectateSection"
-	spectateSection.Size = UDim2.new(0, 400, 0, 80)
+	spectateSection.Size = UDim2.new(0.6, 0, 0, 100)
 	spectateSection.Position = UDim2.fromScale(0.5, 0.58)
 	spectateSection.AnchorPoint = Vector2.new(0.5, 0.5)
 	spectateSection.BackgroundTransparency = 1
@@ -246,19 +247,20 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 	self._spectateLabel = createTextLabel({
 		Name = "TargetName",
 		Text = "---",
-		Size = UDim2.new(0, 200, 0, 30),
-		Position = UDim2.fromScale(0.5, 0.4),
+		Size = UDim2.new(0.5, 0, 0, 30),
+		Position = UDim2.fromScale(0.5, 0.3),
 		AnchorPoint = Vector2.new(0.5, 0),
 		TextSize = 22,
 		TextColor3 = Color3.fromRGB(255, 255, 100),
 		Parent = spectateSection,
 	})
 
-	-- Prev button
+	-- Prev button (48px min height for touch)
+	local specBtnH = PlatformUtil.MinTouchSize(30)
 	local prevBtn = Instance.new("TextButton")
 	prevBtn.Name = "PrevBtn"
-	prevBtn.Size = UDim2.new(0, 60, 0, 30)
-	prevBtn.Position = UDim2.new(0.5, -110, 1, -5)
+	prevBtn.Size = UDim2.new(0, PlatformUtil.MinTouchSize(60), 0, specBtnH)
+	prevBtn.Position = UDim2.new(0.3, 0, 1, -5)
 	prevBtn.AnchorPoint = Vector2.new(0.5, 1)
 	prevBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
 	prevBtn.BackgroundTransparency = 0.3
@@ -274,11 +276,11 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 	prevCorner.CornerRadius = UDim.new(0, 6)
 	prevCorner.Parent = prevBtn
 
-	-- Next button
+	-- Next button (48px min height for touch)
 	local nextBtn = Instance.new("TextButton")
 	nextBtn.Name = "NextBtn"
-	nextBtn.Size = UDim2.new(0, 60, 0, 30)
-	nextBtn.Position = UDim2.new(0.5, 110, 1, -5)
+	nextBtn.Size = UDim2.new(0, PlatformUtil.MinTouchSize(60), 0, specBtnH)
+	nextBtn.Position = UDim2.new(0.7, 0, 1, -5)
 	nextBtn.AnchorPoint = Vector2.new(0.5, 1)
 	nextBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
 	nextBtn.BackgroundTransparency = 0.3
@@ -294,10 +296,10 @@ function WormUIController:_buildDeathScreen(parent: ScreenGui)
 	nextCorner.CornerRadius = UDim.new(0, 6)
 	nextCorner.Parent = nextBtn
 
-	-- Ghost mode toggle button
+	-- Ghost mode toggle button (48px min height for touch)
 	local ghostBtn = Instance.new("TextButton")
 	ghostBtn.Name = "GhostToggle"
-	ghostBtn.Size = UDim2.new(0, 180, 0, 36)
+	ghostBtn.Size = UDim2.new(0, PlatformUtil.MinTouchSize(180), 0, PlatformUtil.MinTouchSize(36))
 	ghostBtn.Position = UDim2.fromScale(0.5, 0.72)
 	ghostBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 	ghostBtn.BackgroundColor3 = Color3.fromRGB(80, 100, 160)
@@ -318,7 +320,7 @@ end
 function WormUIController:_buildKillFeed(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "KillFeed"
-	frame.Size = UDim2.new(0, 300, 0, MAX_KILL_FEED * 28)
+	frame.Size = UDim2.new(0.2, 0, 0, MAX_KILL_FEED * 28)
 	frame.Position = UDim2.new(0, 10, 0, 60)
 	frame.AnchorPoint = Vector2.new(0, 0)
 	frame.BackgroundTransparency = 1
@@ -461,7 +463,7 @@ end
 function WormUIController:_buildPowerUpDisplay(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "PowerUpDisplay"
-	frame.Size = UDim2.new(0, 180, 0, 40)
+	frame.Size = UDim2.new(0.13, 0, 0, 40)
 	frame.Position = UDim2.new(0.5, 0, 0, 65)
 	frame.AnchorPoint = Vector2.new(0.5, 0)
 	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -500,8 +502,8 @@ function WormUIController:_buildGameTimer(parent: ScreenGui)
 	self._gameTimerLabel = createTextLabel({
 		Name = "GameTimer",
 		Text = "0:00",
-		Size = UDim2.new(0, 100, 0, 30),
-		Position = UDim2.new(0.5, 110, 0, 15),
+		Size = UDim2.new(0.06, 0, 0, 30),
+		Position = UDim2.new(0.575, 4, 0, 15),
 		AnchorPoint = Vector2.new(0, 0),
 		TextSize = 18,
 		TextColor3 = Color3.fromRGB(200, 200, 200),
@@ -514,7 +516,7 @@ function WormUIController:_buildZoneWarning(parent: ScreenGui)
 	self._zoneWarningLabel = createTextLabel({
 		Name = "ZoneWarning",
 		Text = "",
-		Size = UDim2.new(0, 400, 0, 40),
+		Size = UDim2.new(0.5, 0, 0, 40),
 		Position = UDim2.new(0.5, 0, 0.2, 0),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		TextSize = 28,
@@ -564,7 +566,7 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	-- Header row
 	local headerFrame = Instance.new("Frame")
 	headerFrame.Name = "Header"
-	headerFrame.Size = UDim2.new(0, 540, 0, 30)
+	headerFrame.Size = UDim2.new(0.7, 0, 0, 30)
 	headerFrame.Position = UDim2.fromScale(0.5, 0.26)
 	headerFrame.AnchorPoint = Vector2.new(0.5, 0)
 	headerFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
@@ -580,8 +582,8 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	createTextLabel({
 		Name = "H1",
 		Text = "#",
-		Size = UDim2.new(0, 40, 1, 0),
-		Position = UDim2.fromOffset(5, 0),
+		Size = UDim2.new(0.08, 0, 1, 0),
+		Position = UDim2.fromScale(0.01, 0),
 		TextSize = 14,
 		TextColor3 = Color3.fromRGB(180, 180, 180),
 		TextXAlignment = Enum.TextXAlignment.Left,
@@ -590,8 +592,8 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	createTextLabel({
 		Name = "H2",
 		Text = "Name",
-		Size = UDim2.new(0, 200, 1, 0),
-		Position = UDim2.fromOffset(50, 0),
+		Size = UDim2.new(0.38, 0, 1, 0),
+		Position = UDim2.fromScale(0.09, 0),
 		TextSize = 14,
 		TextColor3 = Color3.fromRGB(180, 180, 180),
 		TextXAlignment = Enum.TextXAlignment.Left,
@@ -600,8 +602,8 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	createTextLabel({
 		Name = "H3",
 		Text = "Kills",
-		Size = UDim2.new(0, 80, 1, 0),
-		Position = UDim2.fromOffset(270, 0),
+		Size = UDim2.new(0.15, 0, 1, 0),
+		Position = UDim2.fromScale(0.5, 0),
 		TextSize = 14,
 		TextColor3 = Color3.fromRGB(180, 180, 180),
 		Parent = headerFrame,
@@ -609,8 +611,8 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	createTextLabel({
 		Name = "H4",
 		Text = "Max Size",
-		Size = UDim2.new(0, 80, 1, 0),
-		Position = UDim2.fromOffset(360, 0),
+		Size = UDim2.new(0.17, 0, 1, 0),
+		Position = UDim2.fromScale(0.66, 0),
 		TextSize = 14,
 		TextColor3 = Color3.fromRGB(180, 180, 180),
 		Parent = headerFrame,
@@ -618,8 +620,8 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	createTextLabel({
 		Name = "H5",
 		Text = "Coins",
-		Size = UDim2.new(0, 70, 1, 0),
-		Position = UDim2.fromOffset(450, 0),
+		Size = UDim2.new(0.14, 0, 1, 0),
+		Position = UDim2.fromScale(0.84, 0),
 		TextSize = 14,
 		TextColor3 = Color3.fromRGB(255, 220, 50),
 		Parent = headerFrame,
@@ -628,7 +630,7 @@ function WormUIController:_buildFinalScoreboard(parent: ScreenGui)
 	-- Scrolling list container
 	local scrollFrame = Instance.new("ScrollingFrame")
 	scrollFrame.Name = "List"
-	scrollFrame.Size = UDim2.new(0, 540, 0, 300)
+	scrollFrame.Size = UDim2.new(0.7, 0, 0.4, 0)
 	scrollFrame.Position = UDim2.fromScale(0.5, 0.3)
 	scrollFrame.AnchorPoint = Vector2.new(0.5, 0)
 	scrollFrame.BackgroundTransparency = 1
@@ -648,7 +650,7 @@ end
 function WormUIController:_buildCoinDisplay(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "CoinDisplay"
-	frame.Size = UDim2.new(0, 140, 0, 40)
+	frame.Size = UDim2.new(0.1, 0, 0, 40)
 	frame.Position = UDim2.new(1, -10, 0, 10)
 	frame.AnchorPoint = Vector2.new(1, 0)
 	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -738,7 +740,7 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	-- Container bar at bottom center
 	local toolbar = Instance.new("Frame")
 	toolbar.Name = "GhostToolbar"
-	toolbar.Size = UDim2.new(0, 400, 0, 60)
+	toolbar.Size = UDim2.new(0.35, 0, 0, PlatformUtil.MinTouchSize(60))
 	toolbar.Position = UDim2.new(0.5, 0, 1, -10)
 	toolbar.AnchorPoint = Vector2.new(0.5, 1)
 	toolbar.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -770,7 +772,8 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	padding.Parent = toolbar
 
 	-- Slot 1: Grapple
-	local grappleSlot = self:_buildToolbarSlot(toolbar, "1", "GRAPPLE", "LMB to hook", Color3.fromRGB(0, 180, 255))
+	local grappleHintText = PlatformUtil.ActionLabel("LMB to hook", "Tap to hook", "RT to hook")
+	local grappleSlot = self:_buildToolbarSlot(toolbar, "1", "GRAPPLE", grappleHintText, Color3.fromRGB(0, 180, 255))
 	self._grappleSlot = grappleSlot.Frame
 	self._grappleHint = grappleSlot.Hint
 	self._grappleSlotStroke = grappleSlot.Stroke
@@ -787,7 +790,8 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	divider.Parent = toolbar
 
 	-- Slot 2: Weapon
-	local weaponSlot = self:_buildToolbarSlot(toolbar, "2", "---", "LMB to fire", Color3.fromRGB(255, 200, 50))
+	local weaponHintText = PlatformUtil.ActionLabel("LMB to fire", "Tap to fire", "RT to fire")
+	local weaponSlot = self:_buildToolbarSlot(toolbar, "2", "---", weaponHintText, Color3.fromRGB(255, 200, 50))
 	weaponSlot.Frame.LayoutOrder = 3
 	self._weaponSlotLabel = weaponSlot.Label
 	self._weaponSlotAmmo = weaponSlot.Ammo
@@ -810,7 +814,7 @@ function WormUIController:_buildRiderNotification(parent: ScreenGui)
 	local label = Instance.new("TextLabel")
 	label.Name = "RiderNotification"
 	label.Text = ""
-	label.Size = UDim2.new(0, 350, 0, 30)
+	label.Size = UDim2.new(0.4, 0, 0, 30)
 	label.Position = UDim2.new(0.5, 0, 0.12, 0)
 	label.AnchorPoint = Vector2.new(0.5, 0.5)
 	label.BackgroundTransparency = 1
@@ -838,7 +842,7 @@ function WormUIController:_buildToolbarSlot(
 }
 	local slot = Instance.new("TextButton")
 	slot.Name = "Slot" .. keyHint
-	slot.Size = UDim2.new(0, 180, 0, 50)
+	slot.Size = UDim2.new(0.45, 0, 0, PlatformUtil.MinTouchSize(50))
 	slot.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 	slot.BackgroundTransparency = 0.3
 	slot.BorderSizePixel = 0
@@ -947,7 +951,7 @@ function WormUIController:_buildCountdownOverlay(parent: ScreenGui)
 	self._countdownLabel = createTextLabel({
 		Name = "CountdownText",
 		Text = "",
-		Size = UDim2.new(0, 400, 0, 80),
+		Size = UDim2.new(0.5, 0, 0, 80),
 		Position = UDim2.fromScale(0.5, 0.4),
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		TextSize = 48,
@@ -1033,8 +1037,8 @@ function WormUIController:_showFinalScoreboard(results: { any })
 		createTextLabel({
 			Name = "Place",
 			Text = "#" .. entry.Placement,
-			Size = UDim2.new(0, 40, 1, 0),
-			Position = UDim2.fromOffset(5, 0),
+			Size = UDim2.new(0.08, 0, 1, 0),
+			Position = UDim2.fromScale(0.01, 0),
 			TextSize = 14,
 			TextColor3 = nameColor,
 			TextXAlignment = Enum.TextXAlignment.Left,
@@ -1043,8 +1047,8 @@ function WormUIController:_showFinalScoreboard(results: { any })
 		createTextLabel({
 			Name = "Name",
 			Text = entry.Name,
-			Size = UDim2.new(0, 200, 1, 0),
-			Position = UDim2.fromOffset(50, 0),
+			Size = UDim2.new(0.38, 0, 1, 0),
+			Position = UDim2.fromScale(0.09, 0),
 			TextSize = 14,
 			TextColor3 = nameColor,
 			TextXAlignment = Enum.TextXAlignment.Left,
@@ -1053,16 +1057,16 @@ function WormUIController:_showFinalScoreboard(results: { any })
 		createTextLabel({
 			Name = "Kills",
 			Text = tostring(entry.Kills),
-			Size = UDim2.new(0, 80, 1, 0),
-			Position = UDim2.fromOffset(270, 0),
+			Size = UDim2.new(0.15, 0, 1, 0),
+			Position = UDim2.fromScale(0.5, 0),
 			TextSize = 14,
 			Parent = row,
 		})
 		createTextLabel({
 			Name = "MaxSize",
 			Text = tostring(entry.MaxSegments),
-			Size = UDim2.new(0, 80, 1, 0),
-			Position = UDim2.fromOffset(360, 0),
+			Size = UDim2.new(0.17, 0, 1, 0),
+			Position = UDim2.fromScale(0.66, 0),
 			TextSize = 14,
 			Parent = row,
 		})
@@ -1073,8 +1077,8 @@ function WormUIController:_showFinalScoreboard(results: { any })
 		createTextLabel({
 			Name = "Coins",
 			Text = coinsText,
-			Size = UDim2.new(0, 70, 1, 0),
-			Position = UDim2.fromOffset(450, 0),
+			Size = UDim2.new(0.14, 0, 1, 0),
+			Position = UDim2.fromScale(0.84, 0),
 			TextSize = 14,
 			TextColor3 = Color3.fromRGB(255, 220, 50),
 			Parent = row,
@@ -1474,7 +1478,7 @@ function WormUIController:KnitStart()
 				self._weaponSlotAmmo.Text = ""
 			end
 			if self._grappleHint then
-				self._grappleHint.Text = "LMB to hook"
+				self._grappleHint.Text = PlatformUtil.ActionLabel("LMB to hook", "Tap to hook", "RT to hook")
 			end
 			-- Reset slot highlight
 			if self._grappleSlotStroke then
@@ -1497,7 +1501,7 @@ function WormUIController:KnitStart()
 		end
 		-- Update grapple hint: with weapon, grapple is only available when not riding
 		if self._grappleHint then
-			self._grappleHint.Text = "LMB to hook"
+			self._grappleHint.Text = PlatformUtil.ActionLabel("LMB to hook", "Tap to hook", "RT to hook")
 		end
 	end))
 
@@ -1527,7 +1531,9 @@ function WormUIController:KnitStart()
 		end
 		-- Update hint text
 		if self._grappleHint then
-			self._grappleHint.Text = if slot == 1 then "LMB to hook" else "Press [1]"
+			local hookText = PlatformUtil.ActionLabel("LMB to hook", "Tap to hook", "RT to hook")
+			local switchText = PlatformUtil.ActionLabel("Press [1]", "Tap to select", "LB to switch")
+			self._grappleHint.Text = if slot == 1 then hookText else switchText
 		end
 	end))
 

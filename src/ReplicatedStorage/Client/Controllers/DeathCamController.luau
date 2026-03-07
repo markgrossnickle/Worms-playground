@@ -8,6 +8,7 @@ local TweenService = game:GetService("TweenService")
 local Knit = require(ReplicatedStorage.Packages.Knit)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+local PlatformUtil = require(ReplicatedStorage.Shared.PlatformUtil)
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -147,7 +148,7 @@ end
 function DeathCamController:_buildKillPopup(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "KillPopup"
-	frame.Size = UDim2.new(0, 350, 0, 80)
+	frame.Size = UDim2.new(0.3, 0, 0, 80)
 	frame.Position = UDim2.fromScale(0.5, 0.2)
 	frame.AnchorPoint = Vector2.new(0.5, 0.5)
 	frame.BackgroundTransparency = 1
@@ -183,7 +184,7 @@ end
 function DeathCamController:_buildSpectateHud(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "SpectateHud"
-	frame.Size = UDim2.new(0, 400, 0, 100)
+	frame.Size = UDim2.new(0.35, 0, 0, 100)
 	frame.Position = UDim2.fromScale(0.5, 0.92)
 	frame.AnchorPoint = Vector2.new(0.5, 0.5)
 	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -226,9 +227,14 @@ function DeathCamController:_buildSpectateHud(parent: ScreenGui)
 		Parent = frame,
 	})
 
+	local freeCamHintDefault = PlatformUtil.ActionLabel(
+		"[V] Free Cam  |  [Left/Right] Cycle Players",
+		"Use buttons to cycle players",
+		"[Y] Free Cam  |  [LB/RB] Cycle Players"
+	)
 	self._spectateFreeCamLabel = createLabel({
 		Name = "FreeCamHint",
-		Text = "[V] Free Cam  |  [Left/Right] Cycle Players",
+		Text = freeCamHintDefault,
 		Size = UDim2.new(1, -20, 0, 18),
 		Position = UDim2.fromScale(0.5, 0.92),
 		TextSize = 12,
@@ -476,9 +482,17 @@ function DeathCamController:_updateSpectateHud()
 	-- Update free cam label
 	if self._spectateFreeCamLabel then
 		if freeCam then
-			self._spectateFreeCamLabel.Text = "[V] Exit Free Cam  |  WASD + QE to fly"
+			self._spectateFreeCamLabel.Text = PlatformUtil.ActionLabel(
+				"[V] Exit Free Cam  |  WASD + QE to fly",
+				"Tap to exit free cam",
+				"[Y] Exit Free Cam  |  Thumbstick to fly"
+			)
 		else
-			self._spectateFreeCamLabel.Text = "[V] Free Cam  |  [Left/Right] Cycle Players"
+			self._spectateFreeCamLabel.Text = PlatformUtil.ActionLabel(
+				"[V] Free Cam  |  [Left/Right] Cycle Players",
+				"Use buttons to cycle players",
+				"[Y] Free Cam  |  [LB/RB] Cycle Players"
+			)
 		end
 	end
 
@@ -668,10 +682,11 @@ function DeathCamController:_spawnConfetti(parent: BasePart)
 		Color3.fromRGB(255, 100, 200),
 	}
 
-	for i = 1, 3 do
+	local confettiCount = if PlatformUtil.IsTouchDevice then 2 else 3
+	for i = 1, confettiCount do
 		local emitter = Instance.new("ParticleEmitter")
 		emitter.Name = "Confetti" .. i
-		emitter.Rate = 30
+		emitter.Rate = math.floor(30 * PlatformUtil.ParticleScale)
 		emitter.Lifetime = NumberRange.new(1.5, 3)
 		emitter.Speed = NumberRange.new(10, 25)
 		emitter.SpreadAngle = Vector2.new(180, 180)

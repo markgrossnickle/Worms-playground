@@ -8,6 +8,7 @@ local TweenService = game:GetService("TweenService")
 local Knit = require(ReplicatedStorage.Packages.Knit)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+local PlatformUtil = require(ReplicatedStorage.Shared.PlatformUtil)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -162,7 +163,6 @@ function EffectsController:_buildUI()
 	zoneVignette.Image = ""
 	zoneVignette.Parent = gui
 	self._zoneVignetteFrame = zoneVignette
-
 end
 
 --------------------------------------------------
@@ -225,7 +225,7 @@ function EffectsController:_spawnEatParticles(position: Vector3, color: Color3)
 	emitter.LightEmission = 0.8
 	emitter.Parent = part
 
-	emitter:Emit(8)
+	emitter:Emit(math.floor(8 * PlatformUtil.ParticleScale))
 
 	task.delay(0.6, function()
 		part:Destroy()
@@ -300,20 +300,21 @@ function EffectsController:_startBoostEffects()
 		return
 	end
 
-	-- Add trails to worm head and segments
+	-- Add trails to worm head and segments (on mobile, head only for performance)
 	local wormHead = character:FindFirstChild("WormHead") :: BasePart?
 	if wormHead then
 		self:_addBoostTrail(wormHead)
 	end
-	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-	if segFolder then
-		for _, seg in segFolder:GetChildren() do
-			if seg:IsA("BasePart") then
-				self:_addBoostTrail(seg)
+	if not PlatformUtil.IsTouchDevice then
+		local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+		if segFolder then
+			for _, seg in segFolder:GetChildren() do
+				if seg:IsA("BasePart") then
+					self:_addBoostTrail(seg)
+				end
 			end
 		end
 	end
-
 end
 
 function EffectsController:_stopBoostEffects()
@@ -332,7 +333,6 @@ function EffectsController:_stopBoostEffects()
 			end
 		end
 	end
-
 end
 
 function EffectsController:_addBoostTrail(part: BasePart)
@@ -470,7 +470,7 @@ function EffectsController:_spawnDeathExplosion(position: Vector3)
 	emitter.LightEmission = 1
 	emitter.Parent = part
 
-	emitter:Emit(25)
+	emitter:Emit(math.floor(25 * PlatformUtil.ParticleScale))
 
 	-- Flash light
 	local light = Instance.new("PointLight")
@@ -538,7 +538,7 @@ function EffectsController:_onPowerUpActivated(ownerName: string, powerUpType: s
 			emitter.Lifetime = NumberRange.new(0.5, 1)
 			emitter.Speed = NumberRange.new(1, 3)
 			emitter.SpreadAngle = Vector2.new(360, 360)
-			emitter.Rate = 15
+			emitter.Rate = math.floor(15 * PlatformUtil.ParticleScale)
 			emitter.LightEmission = 0.8
 			emitter.Parent = wormHead
 
@@ -585,7 +585,7 @@ function EffectsController:_onPowerUpActivated(ownerName: string, powerUpType: s
 			emitter.Lifetime = NumberRange.new(0.2, 0.4)
 			emitter.Speed = NumberRange.new(5, 10)
 			emitter.SpreadAngle = Vector2.new(20, 20)
-			emitter.Rate = 30
+			emitter.Rate = math.floor(30 * PlatformUtil.ParticleScale)
 			emitter.LightEmission = 0.6
 			emitter.Parent = wormHead
 			entry.Emitter = emitter
@@ -606,7 +606,7 @@ function EffectsController:_onPowerUpActivated(ownerName: string, powerUpType: s
 			emitter.Lifetime = NumberRange.new(0.3, 0.6)
 			emitter.Speed = NumberRange.new(-8, -4) -- pull inward
 			emitter.SpreadAngle = Vector2.new(360, 360)
-			emitter.Rate = 20
+			emitter.Rate = math.floor(20 * PlatformUtil.ParticleScale)
 			emitter.LightEmission = 0.5
 			emitter.Parent = wormHead
 			entry.Emitter = emitter
@@ -849,7 +849,7 @@ function EffectsController:_showStreakPopup(text: string, streak: number)
 
 	local label = Instance.new("TextLabel")
 	label.Name = "StreakPopup"
-	label.Size = UDim2.fromOffset(400, 60)
+	label.Size = UDim2.new(0.3, 0, 0, 60)
 	label.Position = UDim2.fromScale(0.5, 0.35)
 	label.AnchorPoint = Vector2.new(0.5, 0.5)
 	label.BackgroundTransparency = 1
@@ -917,7 +917,7 @@ function EffectsController:_onFreezeRingActivated(ownerName: string)
 	emitter.LightEmission = 0.7
 	emitter.Parent = part
 
-	emitter:Emit(30)
+	emitter:Emit(math.floor(30 * PlatformUtil.ParticleScale))
 
 	task.delay(1.5, function()
 		part:Destroy()

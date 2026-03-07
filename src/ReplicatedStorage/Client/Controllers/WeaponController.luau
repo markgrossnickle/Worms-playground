@@ -448,7 +448,11 @@ function WeaponController:_setupInput()
 			return
 		end
 
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if
+			input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch
+			or input.KeyCode == Enum.KeyCode.ButtonR2
+		then
 			if self._weaponType == "Grenade" then
 				self:TryThrowGrenade()
 			elseif self._weaponType == "PowerShot" then
@@ -461,9 +465,13 @@ function WeaponController:_setupInput()
 	end)
 
 	self._trove:Connect(UserInputService.InputEnded, function(input: InputObject, _processed: boolean)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if
+			input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch
+			or input.KeyCode == Enum.KeyCode.ButtonR2
+		then
 			self._holding = false
-			-- Release PowerShot charge on mouse up
+			-- Release PowerShot charge on release
 			if self._charging then
 				self:ReleasePowerShot()
 			end
