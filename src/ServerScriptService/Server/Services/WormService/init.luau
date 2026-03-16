@@ -32,6 +32,7 @@ local ShrinkZoneService -- Set in KnitStart
 local TeamService -- Set in KnitStart
 local WeaponService -- Set in KnitStart
 local LeaderboardService -- Set in KnitStart
+local SkinService -- Set in KnitStart
 
 local GHOST_FOOD_VALUE = 3 -- segments gained by eating a ghost
 local GHOST_RESPAWN_DELAY = 5 -- seconds before eaten ghost respawns
@@ -97,6 +98,32 @@ end
 
 function WormService:_randomColor(): Color3
 	return Color3.fromHSV(math.random(), 0.8, 0.9)
+end
+
+function WormService:_applySkin(player: Player, character: Model)
+	if not SkinService then
+		return
+	end
+	local skinDef = SkinService:GetSkinDef(player)
+	if not skinDef or skinDef.id == "default" then
+		return
+	end
+
+	local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+	if wormHead then
+		wormHead.Color = skinDef.headColor
+		wormHead.Material = skinDef.segmentMaterial
+	end
+
+	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+	if segFolder then
+		for _, seg in segFolder:GetChildren() do
+			if seg:IsA("BasePart") then
+				seg.Color = skinDef.segmentColor
+				seg.Material = skinDef.segmentMaterial
+			end
+		end
+	end
 end
 
 function WormService:_applyTeamColor(character: Model, teamColor: Color3)
@@ -499,7 +526,10 @@ function WormService:_spawnWorm(player: Player)
 
 	self:_setupCharacter(player, character)
 
-	-- Assign team and apply team color
+	-- Apply equipped skin colors and material
+	self:_applySkin(player, character)
+
+	-- Assign team if team mode is active (team color overrides skin)
 	if TeamService:IsEnabled() then
 		local teamIndex = TeamService:AssignToTeam(player.Name)
 		local teamColor = TeamService:GetTeamColor(teamIndex)
@@ -1763,6 +1793,7 @@ function WormService:KnitStart()
 	TeamService = require(script.Parent.TeamService)
 	WeaponService = require(script.Parent.WeaponService)
 	LeaderboardService = require(script.Parent.LeaderboardService)
+	SkinService = require(script.Parent.SkinService)
 
 	self:_createArena()
 	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)
