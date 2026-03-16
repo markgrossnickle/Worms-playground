@@ -4,6 +4,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
+local Signal = require(ReplicatedStorage.Packages.Signal)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 
 local WormService -- Set in KnitStart
@@ -37,6 +38,9 @@ local RoundService = Knit.CreateService({
 	_eliminationOrder = {} :: { EliminationEntry },
 	_pollConnection = nil :: RBXScriptConnection?,
 	_winningTeamIndex = nil :: number?,
+
+	-- Server-side signal for quest tracking
+	RoundEndedServer = Signal.new(), -- (results)
 })
 
 --------------------------------------------------
@@ -216,6 +220,7 @@ function RoundService:_endRound()
 
 	-- Fire round ended to all clients
 	self.Client.RoundEnded:FireAll(results, winningTeam)
+	self.RoundEndedServer:Fire(results)
 
 	-- Kill all remaining worms/bots
 	WormService:KillAllWorms()
