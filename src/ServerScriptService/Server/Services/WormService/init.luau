@@ -8,6 +8,7 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local Signal = require(ReplicatedStorage.Packages.Signal)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 local Enums = require(ReplicatedStorage.Shared.Enums)
 
 type WormState = Enums.WormState
@@ -25,6 +26,10 @@ type WormData = {
 	HistoryEnd: number,
 	LastRecordedPos: Vector3,
 	SpawnTime: number,
+	GrappleTarget: Vector3?,
+	GrappleStartTime: number,
+	GrappleStartPos: Vector3?,
+	GrappleCooldownEnd: number,
 }
 
 local PowerUpService -- Set in KnitStart
@@ -33,8 +38,8 @@ local TeamService -- Set in KnitStart
 local WeaponService -- Set in KnitStart
 local LeaderboardService -- Set in KnitStart
 
-local GHOST_FOOD_VALUE = 3 -- segments gained by eating a ghost
-local GHOST_RESPAWN_DELAY = 5 -- seconds before eaten ghost respawns
+local GHOST_FOOD_VALUE = WormConfig.Ghost.EatValue
+local GHOST_RESPAWN_DELAY = WormConfig.Ghost.RespawnDelay
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
 local SPAWN_GRACE_PERIOD = 3 -- seconds of zone immunity after spawning
@@ -55,6 +60,7 @@ local WormService = Knit.CreateService({
 		GhostSpawned = Knit.CreateSignal(),
 		GhostDespawned = Knit.CreateSignal(),
 		GhostKnockoff = Knit.CreateSignal(), -- fired to ghost player when shot off a worm
+		GhostEaten = Knit.CreateSignal(), -- fired to all clients when a ghost is eaten (position, eaterName)
 		RiderAttached = Knit.CreateSignal(), -- fired to worm owner when ghost mounts
 		RiderDetached = Knit.CreateSignal(), -- fired to worm owner when ghost dismounts
 	},
@@ -92,7 +98,7 @@ function WormService:_randomArenaPosition(): Vector3
 	local dist = math.sqrt(math.random()) * maxRadius -- sqrt for uniform distribution
 	local x = math.cos(angle) * dist
 	local z = math.sin(angle) * dist
-	return Vector3.new(x, 1, z)
+	return Vector3.new(x, TerrainHeight.getHeight(x, z) + 1, z)
 end
 
 function WormService:_randomColor(): Color3
@@ -131,24 +137,43 @@ function WormService:_createArena()
 		baseplate:Destroy()
 	end
 
-	local arena = Instance.new("Part")
-	arena.Name = "Arena"
-	arena.Size = Vector3.new(WormConfig.ArenaSize, 1, WormConfig.ArenaSize)
-	arena.Position = Vector3.new(0, -0.5, 0)
-	arena.Anchored = true
-	arena.CanQuery = false -- Don't block weapon raycasts
-	arena.Material = Enum.Material.Slate
-	arena.Color = Color3.fromRGB(35, 35, 40)
-	arena.Parent = workspace
+	-- Clear existing terrain and generate desert sand dunes
+	workspace.Terrain:Clear()
 
-	-- Boundary walls
-	local wallHeight = 20
+	local step = 8
+	local count = 0
+	for x = -HALF_ARENA, HALF_ARENA, step do
+		for z = -HALF_ARENA, HALF_ARENA, step do
+			local h = TerrainHeight.getHeight(x, z)
+			workspace.Terrain:FillBlock(CFrame.new(x, h / 2, z), Vector3.new(step, h + 2, step), Enum.Material.Sand)
+		end
+		count += 1
+		if count % 15 == 0 then
+			task.wait()
+		end
+	end
+
+	-- Boundary walls (tall enough to cover terrain height)
+	local wallHeight = 40
 	local wallThickness = 4
+	local wallY = 15
 	local wallData = {
-		{ Vector3.new(WormConfig.ArenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, HALF_ARENA) },
-		{ Vector3.new(WormConfig.ArenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, -HALF_ARENA) },
-		{ Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize), Vector3.new(HALF_ARENA, wallHeight / 2, 0) },
-		{ Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize), Vector3.new(-HALF_ARENA, wallHeight / 2, 0) },
+		{
+			Vector3.new(WormConfig.ArenaSize + wallThickness * 2, wallHeight, wallThickness),
+			Vector3.new(0, wallY, HALF_ARENA),
+		},
+		{
+			Vector3.new(WormConfig.ArenaSize + wallThickness * 2, wallHeight, wallThickness),
+			Vector3.new(0, wallY, -HALF_ARENA),
+		},
+		{
+			Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize + wallThickness * 2),
+			Vector3.new(HALF_ARENA, wallY, 0),
+		},
+		{
+			Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize + wallThickness * 2),
+			Vector3.new(-HALF_ARENA, wallY, 0),
+		},
 	}
 	for i, data in wallData do
 		local wall = Instance.new("Part")
@@ -158,33 +183,40 @@ function WormService:_createArena()
 		wall.Anchored = true
 		wall.CanQuery = false -- Don't block weapon raycasts
 		wall.Material = Enum.Material.SmoothPlastic
-		wall.Color = Color3.fromRGB(80, 0, 0)
+		wall.Color = Color3.fromRGB(120, 60, 20)
 		wall.Transparency = 0.5
 		wall.Parent = workspace
 	end
 
-	-- Configure lighting to remove reflections and default environment effects
+	-- Desert lighting
 	local Lighting = game:GetService("Lighting")
-	Lighting.EnvironmentDiffuseScale = 0
-	Lighting.EnvironmentSpecularScale = 0
+	Lighting.EnvironmentDiffuseScale = 0.3
+	Lighting.EnvironmentSpecularScale = 0.1
 	Lighting.GlobalShadows = true
-	Lighting.Brightness = 2
+	Lighting.Brightness = 3
 	Lighting.ClockTime = 14
-	-- Note: Lighting.Technology is read-only from scripts; set it in Studio properties
-	-- Remove any default children (Sky, Atmosphere, Bloom, etc.)
+	Lighting.Ambient = Color3.fromRGB(80, 70, 50)
+	Lighting.OutdoorAmbient = Color3.fromRGB(120, 110, 90)
 	for _, child in Lighting:GetChildren() do
 		child:Destroy()
 	end
 
-	-- Subtle atmosphere for depth perception in ghost first-person view
+	-- Warm desert atmosphere with sandy haze
 	local atmosphere = Instance.new("Atmosphere")
-	atmosphere.Density = 0.25
+	atmosphere.Density = 0.3
 	atmosphere.Offset = 0.5
-	atmosphere.Color = Color3.fromRGB(40, 40, 50)
-	atmosphere.Decay = Color3.fromRGB(30, 30, 35)
-	atmosphere.Glare = 0
-	atmosphere.Haze = 2
+	atmosphere.Color = Color3.fromRGB(200, 180, 140)
+	atmosphere.Decay = Color3.fromRGB(180, 160, 130)
+	atmosphere.Glare = 0.5
+	atmosphere.Haze = 6
 	atmosphere.Parent = Lighting
+
+	-- Warm color correction for desert feel
+	local colorCorrection = Instance.new("ColorCorrectionEffect")
+	colorCorrection.TintColor = Color3.fromRGB(255, 240, 210)
+	colorCorrection.Brightness = 0.05
+	colorCorrection.Saturation = 0.1
+	colorCorrection.Parent = Lighting
 end
 
 local function pickFoodTier()
@@ -263,7 +295,7 @@ function WormService:_dropFoodAtPositions(positions: { Vector3 }, count: number)
 		else
 			return
 		end
-		pos = Vector3.new(pos.X, 1, pos.Z)
+		pos = Vector3.new(pos.X, TerrainHeight.getHeight(pos.X, pos.Z) + 1, pos.Z)
 
 		local food = Instance.new("Part")
 		food.Name = "Food"
@@ -441,7 +473,8 @@ function WormService:_initPositionHistory(wormData: WormData, spawnPos: Vector3)
 		local behindDist = j * MIN_RECORD_DISTANCE
 		local pos = spawnPos - wormData.Direction * behindDist
 		wormData.HistoryEnd += 1
-		wormData.PositionHistory[wormData.HistoryEnd] = Vector3.new(pos.X, 1, pos.Z)
+		wormData.PositionHistory[wormData.HistoryEnd] =
+			Vector3.new(pos.X, TerrainHeight.getHeight(pos.X, pos.Z) + 1, pos.Z)
 	end
 
 	wormData.LastRecordedPos = spawnPos
@@ -684,7 +717,7 @@ function WormService:DamageWorm(
 		local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 		if hrp then
 			local newPos = hrp.Position + knockbackImpulse.Unit * (knockbackImpulse.Magnitude * 0.1)
-			newPos = Vector3.new(newPos.X, 1, newPos.Z)
+			newPos = Vector3.new(newPos.X, TerrainHeight.getHeight(newPos.X, newPos.Z) + 1, newPos.Z)
 			hrp.CFrame = CFrame.new(newPos, newPos + wormData.CurrentDirection)
 
 			local wormHead = character:FindFirstChild("WormHead") :: BasePart?
@@ -873,6 +906,8 @@ function WormService:_checkGhostEating(player: Player, headPos: Vector3)
 
 		local dist = (ghostHrp.Position - headPos).Magnitude
 		if dist < WormConfig.CollisionRadius + 1 then
+			local eatPos = ghostHrp.Position
+
 			-- Eat the ghost: add segments to the worm
 			local prevFloor = math.floor(wormData.Segments)
 			wormData.Segments += GHOST_FOOD_VALUE
@@ -891,6 +926,9 @@ function WormService:_checkGhostEating(player: Player, headPos: Vector3)
 			self.Client.WormAte:Fire(player, wormData.Segments)
 			self.PlayerScoreChanged:Fire(player, wormData.Segments)
 			self:_updateLeaderstats(player, wormData.Segments)
+
+			-- Notify all clients for visual effect
+			self.Client.GhostEaten:FireAll(eatPos, player.Name)
 
 			-- Despawn the ghost
 			self:DespawnGhost(ghostPlayer)
@@ -923,8 +961,13 @@ function WormService:_checkBotGhostEating(botName: string, headPos: Vector3)
 
 		local dist = (ghostHrp.Position - headPos).Magnitude
 		if dist < WormConfig.CollisionRadius + 1 then
+			local eatPos = ghostHrp.Position
+
 			-- Add segments to the bot via AddSegments
 			self:AddSegments(botName, GHOST_FOOD_VALUE)
+
+			-- Notify all clients for visual effect
+			self.Client.GhostEaten:FireAll(eatPos, botName)
 
 			-- Despawn the ghost
 			self:DespawnGhost(ghostPlayer)
@@ -1056,10 +1099,44 @@ function WormService:_updateMovement(player: Player, dt: number)
 	local dir = Vector3.new(math.sin(newAngle), 0, math.cos(newAngle))
 	wormData.CurrentDirection = dir
 
+	-- Ground grapple pull: override direction and speed when active
+	if wormData.GrappleTarget then
+		local elapsed = os.clock() - wormData.GrappleStartTime
+		if elapsed >= WormConfig.Grapple.PullDuration then
+			-- Grapple finished
+			wormData.GrappleTarget = nil
+			wormData.GrappleStartPos = nil
+			wormData.GrappleCooldownEnd = os.clock() + WormConfig.Grapple.Cooldown
+		else
+			local alpha = math.clamp(elapsed / WormConfig.Grapple.PullDuration, 0, 1)
+			local startPos = wormData.GrappleStartPos :: Vector3
+			local targetPos = wormData.GrappleTarget :: Vector3
+			local newPos = startPos:Lerp(targetPos, alpha)
+			newPos = Vector3.new(newPos.X, TerrainHeight.getHeight(newPos.X, newPos.Z) + 1, newPos.Z)
+
+			local pullDir = (targetPos - startPos) * Vector3.new(1, 0, 1)
+			if pullDir.Magnitude > 0.1 then
+				dir = pullDir.Unit
+				wormData.CurrentDirection = dir
+			end
+
+			local newCFrame = CFrame.new(newPos, newPos + dir)
+			hrp.CFrame = newCFrame
+
+			local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+			if wormHead then
+				wormHead.CFrame = newCFrame
+			end
+
+			self:_recordPosition(wormData, newPos)
+			return
+		end
+	end
+
 	-- Move HRP in direction (anchored, so CFrame set is authoritative)
 	local move = dir * speed * dt
 	local newPos = hrp.Position + move
-	newPos = Vector3.new(newPos.X, 1, newPos.Z) -- Keep on ground
+	newPos = Vector3.new(newPos.X, TerrainHeight.getHeight(newPos.X, newPos.Z) + 1, newPos.Z)
 
 	local newCFrame = CFrame.new(newPos, newPos + dir)
 	hrp.CFrame = newCFrame
@@ -1316,7 +1393,8 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 	end
 
 	local ghostConfig = WormConfig.Ghost
-	local spawnPos = Vector3.new(math.random(-50, 50), 0, math.random(-50, 50))
+	local gx, gz = math.random(-50, 50), math.random(-50, 50)
+	local spawnPos = Vector3.new(gx, TerrainHeight.getHeight(gx, gz) + 2, gz)
 
 	-- Determine ghost color (team color if team mode, default ghostly blue otherwise)
 	local ghostColor = Color3.fromRGB(180, 200, 255)
@@ -1397,6 +1475,24 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 
 	-- Name label above ghost
 	self:_addGhostNameLabel(ghost, player.Name, ghostColor)
+
+	-- Ghostly particle emitter for visibility
+	local ghostHrpForFx = ghost:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if ghostHrpForFx then
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Name = "GhostWisp"
+		emitter.Color = ColorSequence.new(ghostColor, Color3.fromRGB(255, 255, 255))
+		emitter.Transparency =
+			NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.4), NumberSequenceKeypoint.new(1, 1) })
+		emitter.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.5), NumberSequenceKeypoint.new(1, 0) })
+		emitter.Lifetime = NumberRange.new(0.5, 1.2)
+		emitter.Rate = 15
+		emitter.Speed = NumberRange.new(1, 3)
+		emitter.SpreadAngle = Vector2.new(180, 180)
+		emitter.LightEmission = 1
+		emitter.LightInfluence = 0
+		emitter.Parent = ghostHrpForFx
+	end
 
 	-- Tag ghost for hit detection (used by WeaponService)
 	ghost:SetAttribute("IsGhost", true)
@@ -1557,6 +1653,51 @@ end
 
 function WormService.Client:GrappleDetached(player: Player)
 	self.Server:_onGrappleDetached(player)
+end
+
+-- Client method for ground grapple (alive worm fast movement)
+function WormService.Client:GrappleGround(player: Player, targetX: number, targetZ: number)
+	if type(targetX) ~= "number" or type(targetZ) ~= "number" then
+		return
+	end
+	if targetX ~= targetX or targetZ ~= targetZ then
+		return -- NaN check
+	end
+
+	local wormData = self.Server._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	-- Cooldown check
+	if os.clock() < wormData.GrappleCooldownEnd then
+		return
+	end
+
+	-- Already grappling
+	if wormData.GrappleTarget then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	-- Validate range
+	local targetPos = Vector3.new(targetX, TerrainHeight.getHeight(targetX, targetZ) + 1, targetZ)
+	local dist = (targetPos - hrp.Position).Magnitude
+	if dist > WormConfig.Grapple.Range then
+		return
+	end
+
+	wormData.GrappleTarget = targetPos
+	wormData.GrappleStartTime = os.clock()
+	wormData.GrappleStartPos = hrp.Position
 end
 
 -- Client method to request ghost spawn/despawn
@@ -1754,6 +1895,10 @@ local function newWormData(color: Color3): WormData
 		HistoryEnd = 0,
 		LastRecordedPos = Vector3.zero,
 		SpawnTime = 0,
+		GrappleTarget = nil,
+		GrappleStartTime = 0,
+		GrappleStartPos = nil,
+		GrappleCooldownEnd = 0,
 	}
 end
 
