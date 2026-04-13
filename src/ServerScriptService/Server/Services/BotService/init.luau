@@ -7,6 +7,7 @@ local RunService = game:GetService("RunService")
 local Knit = require(ReplicatedStorage.Packages.Knit)
 local Signal = require(ReplicatedStorage.Packages.Signal)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 
 local WormService -- Set in KnitStart via require
 local PowerUpService -- Set in KnitStart via require
@@ -100,7 +101,7 @@ local function randomArenaPosition(): Vector3
 	local dist = math.sqrt(math.random()) * maxRadius
 	local x = math.cos(angle) * dist
 	local z = math.sin(angle) * dist
-	return Vector3.new(x, 1, z)
+	return Vector3.new(x, TerrainHeight.getHeight(x, z) + 1, z)
 end
 
 local function randomColor(): Color3
@@ -231,7 +232,8 @@ function BotService:_initPositionHistory(botData: BotData, spawnPos: Vector3)
 		local behindDist = j * MIN_RECORD_DISTANCE
 		local pos = spawnPos - botData.Direction * behindDist
 		botData.HistoryEnd += 1
-		botData.PositionHistory[botData.HistoryEnd] = Vector3.new(pos.X, 1, pos.Z)
+		botData.PositionHistory[botData.HistoryEnd] =
+			Vector3.new(pos.X, TerrainHeight.getHeight(pos.X, pos.Z) + 1, pos.Z)
 	end
 
 	botData.LastRecordedPos = spawnPos
@@ -801,7 +803,7 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 
 	local move = dir * speed * dt
 	local newPos = hrp.Position + move
-	newPos = Vector3.new(newPos.X, 1, newPos.Z)
+	newPos = Vector3.new(newPos.X, TerrainHeight.getHeight(newPos.X, newPos.Z) + 1, newPos.Z)
 
 	local newCFrame = CFrame.new(newPos, newPos + dir)
 	hrp.CFrame = newCFrame

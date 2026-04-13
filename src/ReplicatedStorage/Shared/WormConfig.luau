@@ -79,7 +79,17 @@ return {
 		MaxRiderSpeedBoost = 2.0, -- cap at 2x total from riders
 		KnockoffStunDuration = 1.5, -- seconds ghost is stunned after being shot off
 		KnockbackForce = 50,
-		GlowBrightness = 0.8,
-		GlowRange = 6,
+		GlowBrightness = 1.5,
+		GlowRange = 12,
+		EatValue = 3, -- segments gained by worm eating a ghost
+		RespawnDelay = 5, -- seconds before eaten ghost respawns
+	},
+
+	-- Grapple (ground pull for worm movement)
+	Grapple = {
+		Range = 80,
+		PullSpeed = 100,
+		PullDuration = 0.6,
+		Cooldown = 2,
 	},
 }

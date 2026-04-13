@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
 local RING_SEGMENTS = 64
@@ -66,8 +67,10 @@ function ShrinkZoneService:_updateRingVisual()
 		local angle = segAngle * (i - 1)
 		local x = math.cos(angle) * radius
 		local z = math.sin(angle) * radius
+		local terrainY = TerrainHeight.getHeight(x, z)
 		part.Size = Vector3.new(math.max(arcLength + 0.5, 0.5), RING_HEIGHT, 1)
-		part.CFrame = CFrame.new(Vector3.new(x, RING_HEIGHT / 2, z)) * CFrame.Angles(0, -angle + math.pi / 2, 0)
+		part.CFrame = CFrame.new(Vector3.new(x, terrainY + RING_HEIGHT / 2, z))
+			* CFrame.Angles(0, -angle + math.pi / 2, 0)
 	end
 end
 

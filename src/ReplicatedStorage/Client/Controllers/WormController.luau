@@ -9,6 +9,7 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local Signal = require(ReplicatedStorage.Packages.Signal)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
+local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -89,6 +90,15 @@ local WormController = Knit.CreateController({
 
 	-- Gamepad state
 	_gamepadThumbstick = Vector2.zero,
+
+	-- Ground grapple state (alive worm mode)
+	_groundGrappleActive = false,
+	_groundGrappleTarget = nil :: Vector3?,
+	_groundGrappleBeam = nil :: Beam?,
+	_groundGrappleAtt0 = nil :: Attachment?,
+	_groundGrappleAtt1 = nil :: Attachment?,
+	_groundGrappleAnchor = nil :: Part?,
+	_groundGrappleCooldownEnd = 0,
 })
 
 --------------------------------------------------
@@ -323,8 +333,18 @@ function WormController:_getWorldDirection(): Vector3?
 
 	local ray = Camera:ScreenPointToRay(screenX, screenY)
 
-	-- Intersect ray with ground plane (Y = 1)
-	local planeY = 1
+	-- Intersect ray with approximate ground plane at player's terrain height
+	local character = LocalPlayer.Character
+	if not character then
+		return nil
+	end
+
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return nil
+	end
+
+	local planeY = hrp.Position.Y
 	if ray.Direction.Y == 0 then
 		return nil
 	end
@@ -335,16 +355,6 @@ function WormController:_getWorldDirection(): Vector3?
 	end
 
 	local hitPoint = ray.Origin + ray.Direction * t
-
-	local character = LocalPlayer.Character
-	if not character then
-		return nil
-	end
-
-	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return nil
-	end
 
 	local dir = (hitPoint - hrp.Position) * Vector3.new(1, 0, 1)
 	if dir.Magnitude < 0.1 then
@@ -365,6 +375,13 @@ function WormController:_setupInput()
 
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.LeftShift then
 			self:SetBoosting(true)
+		end
+
+		-- Ground grapple: right-click or E key when alive
+		if self._alive then
+			if input.UserInputType == Enum.UserInputType.MouseButton2 or input.KeyCode == Enum.KeyCode.E then
+				self:_fireGroundGrapple()
+			end
 		end
 	end)
 
@@ -428,6 +445,10 @@ function WormController:_setupInput()
 		end
 		if input.KeyCode == Enum.KeyCode.ButtonR2 or input.KeyCode == Enum.KeyCode.ButtonA then
 			self:SetBoosting(true)
+		end
+		-- Gamepad ground grapple
+		if self._alive and input.KeyCode == Enum.KeyCode.ButtonX then
+			self:_fireGroundGrapple()
 		end
 	end)
 	self._trove:Connect(UserInputService.InputEnded, function(input: InputObject, _processed: boolean)
@@ -518,6 +539,9 @@ function WormController:_connectServerSignals()
 					end
 					self._lastDeathPosition = deathPos
 
+					-- Clean up ground grapple if active
+					self:_cleanupGroundGrapple()
+
 					local survivalTime = math.floor(os.clock() - self._spawnTime)
 					self._alive = false
 					self._freeCamActive = false
@@ -599,6 +623,11 @@ function WormController:_connectServerSignals()
 
 	self._trove:Add(self._wormService.GhostKnockoff:Connect(function(knockbackDir: Vector3)
 		self:_onKnockoff(knockbackDir)
+	end))
+
+	-- Ghost eaten visual effect
+	self._trove:Add(self._wormService.GhostEaten:Connect(function(eatPos: Vector3, _eaterName: string)
+		self:_showGhostEatEffect(eatPos)
 	end))
 
 	-- Suppress Knit warnings for signals we don't directly use here
@@ -712,6 +741,43 @@ function WormController:_addSpeedBurstTrail()
 	trail.WidthScale = NumberSequence.new(1)
 	trail.LightEmission = 0.5
 	trail.Parent = wormHead
+end
+
+function WormController:_showGhostEatEffect(position: Vector3)
+	-- Brief particle burst at eat location
+	local part = Instance.new("Part")
+	part.Name = "GhostEatFX"
+	part.Size = Vector3.new(1, 1, 1)
+	part.Position = position
+	part.Anchored = true
+	part.CanCollide = false
+	part.Transparency = 1
+	part.Parent = workspace
+
+	local emitter = Instance.new("ParticleEmitter")
+	emitter.Color = ColorSequence.new(Color3.fromRGB(180, 200, 255), Color3.fromRGB(255, 255, 255))
+	emitter.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+	emitter.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1.5), NumberSequenceKeypoint.new(1, 0) })
+	emitter.Lifetime = NumberRange.new(0.3, 0.8)
+	emitter.Speed = NumberRange.new(5, 15)
+	emitter.SpreadAngle = Vector2.new(360, 360)
+	emitter.LightEmission = 1
+	emitter.LightInfluence = 0
+	emitter.Rate = 0 -- use Emit
+	emitter.Parent = part
+	emitter:Emit(20)
+
+	-- Point light flash
+	local light = Instance.new("PointLight")
+	light.Color = Color3.fromRGB(180, 200, 255)
+	light.Brightness = 3
+	light.Range = 15
+	light.Parent = part
+
+	-- Clean up after particles fade
+	task.delay(1, function()
+		part:Destroy()
+	end)
 end
 
 function WormController:ToggleGhostMode()
@@ -838,6 +904,136 @@ function WormController:_exitGhostMode()
 	Camera.CameraType = Enum.CameraType.Scriptable
 
 	self.GhostModeChanged:Fire(false)
+end
+
+--------------------------------------------------
+-- Ground grapple (alive worm fast movement)
+--------------------------------------------------
+
+function WormController:_getGroundGrappleTarget(): Vector3?
+	local mouse = LocalPlayer:GetMouse()
+	local ray = Camera:ScreenPointToRay(mouse.X, mouse.Y)
+
+	local character = LocalPlayer.Character
+	if not character then
+		return nil
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return nil
+	end
+
+	-- Intersect with terrain plane
+	local planeY = hrp.Position.Y
+	if ray.Direction.Y == 0 then
+		return nil
+	end
+	local t = (planeY - ray.Origin.Y) / ray.Direction.Y
+	if t < 0 then
+		return nil
+	end
+
+	local hitPoint = ray.Origin + ray.Direction * t
+	local dist = (hitPoint - hrp.Position).Magnitude
+	if dist > WormConfig.Grapple.Range then
+		return nil
+	end
+
+	return Vector3.new(hitPoint.X, TerrainHeight.getHeight(hitPoint.X, hitPoint.Z) + 1, hitPoint.Z)
+end
+
+function WormController:_fireGroundGrapple()
+	if not self._alive or self._inGhostMode then
+		return
+	end
+	if os.clock() < self._groundGrappleCooldownEnd then
+		return
+	end
+	if self._groundGrappleActive then
+		return
+	end
+
+	local target = self:_getGroundGrappleTarget()
+	if not target then
+		return
+	end
+
+	self._groundGrappleActive = true
+	self._groundGrappleTarget = target
+	self._groundGrappleCooldownEnd = os.clock() + WormConfig.Grapple.PullDuration + WormConfig.Grapple.Cooldown
+
+	-- Send to server
+	self._wormService:GrappleGround(target.X, target.Z)
+
+	-- Visual: beam from worm to target
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	-- Create anchor part at target
+	local anchor = Instance.new("Part")
+	anchor.Name = "GrappleAnchor"
+	anchor.Size = Vector3.new(0.5, 0.5, 0.5)
+	anchor.Position = target
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.Transparency = 0.5
+	anchor.Material = Enum.Material.Neon
+	anchor.Color = Color3.fromRGB(0, 200, 255)
+	anchor.Parent = workspace
+	self._groundGrappleAnchor = anchor
+
+	local att0 = Instance.new("Attachment")
+	att0.Parent = hrp
+	self._groundGrappleAtt0 = att0
+
+	local att1 = Instance.new("Attachment")
+	att1.Parent = anchor
+	self._groundGrappleAtt1 = att1
+
+	local beam = Instance.new("Beam")
+	beam.Attachment0 = att0
+	beam.Attachment1 = att1
+	beam.Color = ColorSequence.new(Color3.fromRGB(0, 200, 255))
+	beam.Width0 = 0.4
+	beam.Width1 = 0.2
+	beam.FaceCamera = true
+	beam.LightEmission = 0.8
+	beam.Transparency = NumberSequence.new(0.1)
+	beam.Parent = hrp
+	self._groundGrappleBeam = beam
+
+	-- Clean up after pull duration
+	task.delay(WormConfig.Grapple.PullDuration + 0.1, function()
+		self:_cleanupGroundGrapple()
+	end)
+end
+
+function WormController:_cleanupGroundGrapple()
+	self._groundGrappleActive = false
+	self._groundGrappleTarget = nil
+
+	if self._groundGrappleBeam then
+		self._groundGrappleBeam:Destroy()
+		self._groundGrappleBeam = nil
+	end
+	if self._groundGrappleAtt0 then
+		self._groundGrappleAtt0:Destroy()
+		self._groundGrappleAtt0 = nil
+	end
+	if self._groundGrappleAtt1 then
+		self._groundGrappleAtt1:Destroy()
+		self._groundGrappleAtt1 = nil
+	end
+	if self._groundGrappleAnchor then
+		self._groundGrappleAnchor:Destroy()
+		self._groundGrappleAnchor = nil
+	end
 end
 
 --------------------------------------------------
