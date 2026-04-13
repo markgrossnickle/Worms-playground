@@ -17,6 +17,10 @@ local HALF_ARENA = WormConfig.ArenaSize / 2
 local MIN_RECORD_DISTANCE = 0.5
 local ENTRIES_PER_SEGMENT = math.ceil(WormConfig.SegmentSpacing / MIN_RECORD_DISTANCE)
 
+local BOT_SEGMENT_LERP_SPEED = 5
+local BOT_SEGMENT_LERP_EPSILON = 0.1
+local BOT_SEGMENT_LERP_DELAY = 0.08
+
 local TARGET_TOTAL_WORMS = 24
 local FOOD_SEEK_RANGE = 30
 local POWERUP_SEEK_RANGE = 20
@@ -69,6 +73,7 @@ type BotData = {
 	LastRecordedPos: Vector3,
 	NextDirectionChange: number,
 	BoostEndTime: number,
+	LerpingSegments: { [number]: number }?, -- indices currently lerping; value is os.clock() start time after delay
 }
 
 local BotService = Knit.CreateService({
@@ -114,6 +119,7 @@ end
 function BotService:_createBotModel(name: string, color: Color3, spawnPos: Vector3): Model
 	local model = Instance.new("Model")
 	model.Name = name
+	model:SetAttribute("IsBotWorm", true)
 
 	local hrp = Instance.new("Part")
 	hrp.Name = "HumanoidRootPart"
@@ -194,6 +200,8 @@ function BotService:_createSegment(botData: BotData, index: number)
 	seg.CanCollide = false
 	seg.Material = Enum.Material.SmoothPlastic
 	seg.Color = botData.Color
+	seg:SetAttribute("MaxHP", WormConfig.SegmentHP)
+	seg:SetAttribute("HP", WormConfig.SegmentHP)
 
 	if botData.HistoryEnd >= botData.HistoryStart then
 		local histIndex = botData.HistoryEnd - index * ENTRIES_PER_SEGMENT
@@ -382,7 +390,13 @@ function BotService:_killBot(botName: string, killerName: string?)
 	self.BotKilled:Fire(botName, killerName)
 end
 
-function BotService:DamageBot(botName: string, segmentsToRemove: number, killerName: string?)
+function BotService:DamageBot(
+	botName: string,
+	damage: number,
+	killerName: string?,
+	hitSegmentIndex: number?,
+	isWeaponHit: boolean?
+)
 	local botData = self._bots[botName]
 	if not botData or botData.State ~= "Alive" then
 		return
@@ -390,26 +404,97 @@ function BotService:DamageBot(botName: string, segmentsToRemove: number, killerN
 
 	local model = botData.Model
 	local prevFloor = math.floor(botData.Segments)
-	botData.Segments = math.max(0, botData.Segments - segmentsToRemove)
+	if damage <= 0 or prevFloor <= 0 then
+		return
+	end
+
+	local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+
+	-- Weapon hits deplete segment HP starting at the hit segment and cascade toward tail.
+	-- Non-weapon damage (collisions, shrink zone) still removes whole tail segments.
+	local removeStart: number
+	local removeEnd: number
+	local actualRemoved = 0
+
+	if isWeaponHit and hitSegmentIndex and hitSegmentIndex >= 1 and hitSegmentIndex <= prevFloor and segFolder then
+		removeStart = hitSegmentIndex + 1
+		removeEnd = hitSegmentIndex
+		local remaining = damage
+		local idx = hitSegmentIndex
+		while remaining > 0 and idx <= prevFloor do
+			local seg = segFolder:FindFirstChild("Segment" .. idx) :: BasePart?
+			if not seg then
+				break
+			end
+			local hp = tonumber(seg:GetAttribute("HP")) or WormConfig.SegmentHP
+			if remaining >= hp then
+				remaining -= hp
+				seg:SetAttribute("HP", 0)
+				if actualRemoved == 0 then
+					removeStart = idx
+				end
+				removeEnd = idx
+				actualRemoved += 1
+				idx += 1
+			else
+				seg:SetAttribute("HP", hp - remaining)
+				remaining = 0
+			end
+		end
+
+		if actualRemoved == 0 then
+			-- Damage absorbed by segment HP — nothing destroyed
+			return
+		end
+	else
+		actualRemoved = math.min(damage, prevFloor)
+		if actualRemoved <= 0 then
+			return
+		end
+		removeEnd = prevFloor
+		removeStart = prevFloor - actualRemoved + 1
+	end
+
+	botData.Segments = math.max(0, botData.Segments - actualRemoved)
 	local newFloor = math.floor(botData.Segments)
 
-	-- Drop food from removed segments
-	local actualRemoved = prevFloor - newFloor
+	-- Drop food from removed segment positions
 	if actualRemoved > 0 then
 		WormService:DropFoodFromModel(model, actualRemoved)
 	end
 
-	-- Destroy removed segment visuals
-	if newFloor < prevFloor then
-		local segFolder = model:FindFirstChild("WormSegments") :: Folder?
-		if segFolder then
-			for i = newFloor + 1, prevFloor do
+	-- Destroy hit segments and renumber tail to fill the gap
+	local isMidBodyHit = isWeaponHit == true and removeEnd < prevFloor
+	if segFolder then
+		for i = removeStart, removeEnd do
+			local seg = segFolder:FindFirstChild("Segment" .. i)
+			if seg then
+				seg:Destroy()
+			end
+		end
+		if removeEnd < prevFloor then
+			for i = removeEnd + 1, prevFloor do
 				local seg = segFolder:FindFirstChild("Segment" .. i)
 				if seg then
-					seg:Destroy()
+					seg.Name = "Segment" .. (i - actualRemoved)
 				end
 			end
 		end
+	end
+
+	if isMidBodyHit then
+		local lerping = botData.LerpingSegments
+		if not lerping then
+			lerping = {}
+			botData.LerpingSegments = lerping
+		end
+		local lerpStartTime = os.clock() + BOT_SEGMENT_LERP_DELAY
+		for newIdx = removeStart, prevFloor - actualRemoved do
+			(lerping :: { [number]: number })[newIdx] = lerpStartTime
+		end
+	end
+
+	if newFloor < prevFloor then
 		WormService:UpdateBotSegments(botName, newFloor)
 	end
 
@@ -417,6 +502,43 @@ function BotService:DamageBot(botName: string, segmentsToRemove: number, killerN
 	if botData.Segments <= 0 then
 		self:_killBot(botName, killerName)
 	end
+end
+
+-- Apply explosion damage to a bot worm. See WormService:ExplodeWorm for the
+-- per-segment radial logic — this mirrors it for bots.
+function BotService:ExplodeBot(
+	botName: string,
+	center: Vector3,
+	radius: number,
+	baseDamage: number,
+	killerName: string?
+)
+	local botData = self._bots[botName]
+	if not botData or botData.State ~= "Alive" then
+		return
+	end
+	local segFolder = botData.Model:FindFirstChild("WormSegments") :: Folder?
+	if not segFolder then
+		return
+	end
+	local segCount = math.floor(botData.Segments)
+	local primaryHit: number? = nil
+	local extraDamage = 0
+	for i = 1, segCount do
+		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
+		if seg and (seg.Position - center).Magnitude <= radius then
+			if not primaryHit then
+				primaryHit = i
+			else
+				local hp = tonumber(seg:GetAttribute("HP")) or WormConfig.SegmentHP
+				extraDamage += hp
+			end
+		end
+	end
+	if not primaryHit then
+		primaryHit = segCount
+	end
+	self:DamageBot(botName, baseDamage + extraDamage, killerName, primaryHit, true)
 end
 
 --------------------------------------------------
@@ -692,13 +814,14 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 	self:_recordPosition(botData, newPos)
 end
 
-function BotService:_updateBotSegments(botData: BotData)
+function BotService:_updateBotSegments(botData: BotData, dt: number)
 	local model = botData.Model
 	local segFolder = model:FindFirstChild("WormSegments") :: Folder?
 	if not segFolder then
 		return
 	end
 
+	local lerping = botData.LerpingSegments
 	local segCount = math.floor(botData.Segments)
 	for i = 1, segCount do
 		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
@@ -708,8 +831,27 @@ function BotService:_updateBotSegments(botData: BotData)
 
 		local histIndex = botData.HistoryEnd - i * ENTRIES_PER_SEGMENT
 		if histIndex >= botData.HistoryStart and botData.PositionHistory[histIndex] then
-			seg.Position = botData.PositionHistory[histIndex]
+			local target = botData.PositionHistory[histIndex]
+			local lerpStart = lerping and lerping[i] or nil
+			if lerpStart and os.clock() >= lerpStart then
+				-- Post-delay: slide toward the target position to fill the gap
+				local alpha = math.min(1, dt * BOT_SEGMENT_LERP_SPEED)
+				local newPos = seg.Position:Lerp(target, alpha)
+				seg.Position = newPos
+				if (newPos - target).Magnitude < BOT_SEGMENT_LERP_EPSILON then
+					lerping[i] = nil
+				end
+			elseif not lerpStart then
+				-- Not lerping: snap to target position from history
+				seg.Position = target
+			end
+			-- Pre-delay (lerpStart set but os.clock() < lerpStart): leave segment in
+			-- place so the destroyed segment's gap is briefly visible.
 		end
+	end
+
+	if lerping and next(lerping) == nil then
+		botData.LerpingSegments = nil
 	end
 end
 
@@ -984,7 +1126,7 @@ function BotService:KnitStart()
 
 			self:_updateAI(botData, now)
 			self:_updateBotMovement(botData, dt)
-			self:_updateBotSegments(botData)
+			self:_updateBotSegments(botData, dt)
 			self:_checkBotFoodCollection(botData)
 			self:_checkBotCollisions(botData)
 		end

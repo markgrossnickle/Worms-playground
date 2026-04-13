@@ -7,7 +7,7 @@ local PlatformUtil = {}
 
 PlatformUtil.IsTouchDevice = UserInputService.TouchEnabled
 PlatformUtil.IsConsole = GuiService:IsTenFootInterface()
-PlatformUtil.IsGamepad = PlatformUtil.IsConsole or (#UserInputService:GetGamepads() > 0)
+PlatformUtil.IsGamepad = PlatformUtil.IsConsole or (#UserInputService:GetConnectedGamepads() > 0)
 PlatformUtil.IsDesktop = not PlatformUtil.IsTouchDevice and not PlatformUtil.IsConsole
 
 -- VFX scale factor: 50% reduction on mobile devices

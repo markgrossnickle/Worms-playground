@@ -25,6 +25,7 @@ type WormData = {
 	HistoryEnd: number,
 	LastRecordedPos: Vector3,
 	SpawnTime: number,
+	LerpingSegments: { [number]: number }?, -- segment indices currently lerping after a mid-body hit; value is os.clock() start time (after delay)
 }
 
 local PowerUpService -- Set in KnitStart
@@ -43,6 +44,7 @@ local SPAWN_GRACE_PERIOD = 3 -- seconds of zone immunity after spawning
 -- Each segment reads ENTRIES_PER_SEGMENT entries behind the head in the buffer.
 local MIN_RECORD_DISTANCE = 0.5
 local ENTRIES_PER_SEGMENT = math.ceil(WormConfig.SegmentSpacing / MIN_RECORD_DISTANCE)
+local SEGMENT_LERP_DELAY = 0.08 -- brief pause after a hit before back segments begin sliding in
 
 local WormService = Knit.CreateService({
 	Name = "WormService",
@@ -141,8 +143,8 @@ function WormService:_createArena()
 	arena.Color = Color3.fromRGB(35, 35, 40)
 	arena.Parent = workspace
 
-	-- Boundary walls
-	local wallHeight = 20
+	-- Boundary walls — animated energy barrier (force field + glowing capstones + beams)
+	local wallHeight = 24
 	local wallThickness = 4
 	local wallData = {
 		{ Vector3.new(WormConfig.ArenaSize, wallHeight, wallThickness), Vector3.new(0, wallHeight / 2, HALF_ARENA) },
@@ -150,18 +152,99 @@ function WormService:_createArena()
 		{ Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize), Vector3.new(HALF_ARENA, wallHeight / 2, 0) },
 		{ Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize), Vector3.new(-HALF_ARENA, wallHeight / 2, 0) },
 	}
+
+	local wallsFolder = Instance.new("Folder")
+	wallsFolder.Name = "BoundaryWalls"
+	wallsFolder.Parent = workspace
+
+	local animatedWallParts: { Part } = {}
+
 	for i, data in wallData do
+		-- Main force-field body — keep CanCollide=true so ghosts can't leave the arena
 		local wall = Instance.new("Part")
 		wall.Name = "Wall" .. i
 		wall.Size = data[1]
 		wall.Position = data[2]
 		wall.Anchored = true
-		wall.CanQuery = false -- Don't block weapon raycasts
-		wall.Material = Enum.Material.SmoothPlastic
-		wall.Color = Color3.fromRGB(80, 0, 0)
-		wall.Transparency = 0.5
-		wall.Parent = workspace
+		wall.CanQuery = false -- don't block weapon raycasts
+		wall.CanCollide = true
+		wall.Material = Enum.Material.ForceField
+		wall.Color = Color3.fromRGB(255, 40, 40)
+		wall.Transparency = 0.2
+		wall.Parent = wallsFolder
+		table.insert(animatedWallParts, wall)
+
+		-- Glowing capstone along the top
+		local size = data[1]
+		local pos = data[2]
+		local topCap = Instance.new("Part")
+		topCap.Name = "WallCapTop" .. i
+		topCap.Size = Vector3.new(size.X, 0.6, size.Z)
+		topCap.Position = Vector3.new(pos.X, pos.Y + wallHeight / 2, pos.Z)
+		topCap.Anchored = true
+		topCap.CanQuery = false
+		topCap.CanCollide = false
+		topCap.Material = Enum.Material.Neon
+		topCap.Color = Color3.fromRGB(255, 30, 30)
+		topCap.Parent = wallsFolder
+		table.insert(animatedWallParts, topCap)
+
+		-- Glowing capstone along the bottom
+		local bottomCap = Instance.new("Part")
+		bottomCap.Name = "WallCapBot" .. i
+		bottomCap.Size = Vector3.new(size.X, 0.6, size.Z)
+		bottomCap.Position = Vector3.new(pos.X, 0.3, pos.Z)
+		bottomCap.Anchored = true
+		bottomCap.CanQuery = false
+		bottomCap.CanCollide = false
+		bottomCap.Material = Enum.Material.Neon
+		bottomCap.Color = Color3.fromRGB(255, 30, 30)
+		bottomCap.Parent = wallsFolder
+		table.insert(animatedWallParts, bottomCap)
+
+		-- Point lights every ~80 studs along the wall for a patrol-light effect
+		local longAxis = math.max(size.X, size.Z)
+		local numLights = math.max(4, math.floor(longAxis / 80))
+		for j = 1, numLights do
+			local t = (j - 0.5) / numLights - 0.5 -- -0.5 .. 0.5
+			local lightPos: Vector3
+			if size.X > size.Z then
+				lightPos = Vector3.new(pos.X + size.X * t, wallHeight + 1, pos.Z)
+			else
+				lightPos = Vector3.new(pos.X, wallHeight + 1, pos.Z + size.Z * t)
+			end
+			local lightAnchor = Instance.new("Part")
+			lightAnchor.Name = "WallLight" .. i .. "_" .. j
+			lightAnchor.Size = Vector3.new(1.5, 1.5, 1.5)
+			lightAnchor.Shape = Enum.PartType.Ball
+			lightAnchor.Position = lightPos
+			lightAnchor.Anchored = true
+			lightAnchor.CanCollide = false
+			lightAnchor.CanQuery = false
+			lightAnchor.Material = Enum.Material.Neon
+			lightAnchor.Color = Color3.fromRGB(255, 60, 60)
+			lightAnchor.Parent = wallsFolder
+
+			local pointLight = Instance.new("PointLight")
+			pointLight.Color = Color3.fromRGB(255, 80, 80)
+			pointLight.Brightness = 3
+			pointLight.Range = 30
+			pointLight.Parent = lightAnchor
+		end
 	end
+
+	-- Pulse the walls between two red shades on Heartbeat for an energy-barrier feel
+	RunService.Heartbeat:Connect(function()
+		local t = os.clock()
+		local pulse = (math.sin(t * 2.5) + 1) * 0.5 -- 0..1
+		local r = 180 + pulse * 75
+		local g = 20 + pulse * 40
+		local b = 20 + pulse * 40
+		local pulsedColor = Color3.fromRGB(r, g, b)
+		for _, part in animatedWallParts do
+			part.Color = pulsedColor
+		end
+	end)
 
 	-- Configure lighting to remove reflections and default environment effects
 	local Lighting = game:GetService("Lighting")
@@ -409,6 +492,8 @@ function WormService:_createSegment(character: Model, player: Player, index: num
 	seg.CanCollide = false
 	seg.Material = Enum.Material.SmoothPlastic
 	seg.Color = color
+	seg:SetAttribute("MaxHP", WormConfig.SegmentHP)
+	seg:SetAttribute("HP", WormConfig.SegmentHP)
 
 	-- Position from history if available, otherwise behind head in current direction
 	if wormData and wormData.HistoryEnd >= wormData.HistoryStart then
@@ -484,6 +569,7 @@ function WormService:_spawnWorm(player: Player)
 	wormData.Boosting = false
 	wormData.Kills = 0
 	wormData.SpawnTime = os.clock()
+	wormData.LerpingSegments = nil
 
 	-- Respawn character at random arena position
 	local spawnPos = self:_randomArenaPosition()
@@ -595,10 +681,11 @@ end
 
 function WormService:DamageWorm(
 	player: Player,
-	segmentsToRemove: number,
+	damage: number,
 	attacker: Player?,
 	knockbackImpulse: Vector3?,
-	hitSegmentIndex: number?
+	hitSegmentIndex: number?,
+	isWeaponHit: boolean?
 )
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
@@ -611,23 +698,56 @@ function WormService:DamageWorm(
 	end
 
 	local currentFloor = math.floor(wormData.Segments)
-	local actualRemoved = math.min(segmentsToRemove, currentFloor)
-	if actualRemoved <= 0 then
+	if damage <= 0 or currentFloor <= 0 then
 		return
 	end
 
 	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
 
-	-- Determine removal range
+	-- Weapon hits (with a specific segment) deplete HP starting at the hit segment and
+	-- cascade remaining damage toward the tail. Non-weapon damage (collisions, shrink
+	-- zone, boost) still removes whole segments from the tail as before — `damage` is
+	-- treated as a segment count in that case.
 	local removeStart: number
 	local removeEnd: number
-	if hitSegmentIndex and hitSegmentIndex >= 1 and hitSegmentIndex <= currentFloor then
-		-- Hit-point removal: remove segments starting at the hit index
-		removeStart = hitSegmentIndex
-		removeEnd = math.min(hitSegmentIndex + actualRemoved - 1, currentFloor)
-		actualRemoved = removeEnd - removeStart + 1
+	local actualRemoved = 0
+
+	if isWeaponHit and hitSegmentIndex and hitSegmentIndex >= 1 and hitSegmentIndex <= currentFloor and segFolder then
+		removeStart = hitSegmentIndex + 1 -- placeholder; narrowed below if anything destroyed
+		removeEnd = hitSegmentIndex
+		local remaining = damage
+		local idx = hitSegmentIndex
+		while remaining > 0 and idx <= currentFloor do
+			local seg = segFolder:FindFirstChild("Segment" .. idx) :: BasePart?
+			if not seg then
+				break
+			end
+			local hp = tonumber(seg:GetAttribute("HP")) or WormConfig.SegmentHP
+			if remaining >= hp then
+				remaining -= hp
+				seg:SetAttribute("HP", 0)
+				if actualRemoved == 0 then
+					removeStart = idx
+				end
+				removeEnd = idx
+				actualRemoved += 1
+				idx += 1
+			else
+				seg:SetAttribute("HP", hp - remaining)
+				remaining = 0
+			end
+		end
+
+		if actualRemoved == 0 then
+			-- Damage was absorbed by segment HP — no segments destroyed this hit.
+			return
+		end
 	else
-		-- Tail removal (collisions, shrink zone, boost, etc.)
+		-- Tail removal: `damage` is a segment count
+		actualRemoved = math.min(damage, currentFloor)
+		if actualRemoved <= 0 then
+			return
+		end
 		removeEnd = currentFloor
 		removeStart = currentFloor - actualRemoved + 1
 	end
@@ -653,6 +773,7 @@ function WormService:DamageWorm(
 	local newFloor = math.floor(wormData.Segments)
 
 	-- Destroy removed segment visuals and renumber remaining tail segments
+	local isMidBodyHit = isWeaponHit == true and removeEnd < currentFloor
 	if segFolder then
 		-- Destroy the hit segments
 		for i = removeStart, removeEnd do
@@ -664,12 +785,28 @@ function WormService:DamageWorm(
 
 		-- Renumber: segments after removeEnd shift down to fill the gap
 		if removeEnd < currentFloor then
+			-- Rename in ascending order (from lowest new index up) so we never clash
 			for i = removeEnd + 1, currentFloor do
 				local seg = segFolder:FindFirstChild("Segment" .. i)
 				if seg then
 					seg.Name = "Segment" .. (i - actualRemoved)
 				end
 			end
+		end
+	end
+
+	-- For mid-body hits, lerp the shifted segments smoothly to fill the gap.
+	-- We store the time the lerp should START so the destroyed segment is visible
+	-- briefly before the rest slide in to fill the gap.
+	if isMidBodyHit then
+		local lerping = wormData.LerpingSegments
+		if not lerping then
+			lerping = {}
+			wormData.LerpingSegments = lerping
+		end
+		local lerpStartTime = os.clock() + SEGMENT_LERP_DELAY
+		for newIdx = removeStart, currentFloor - actualRemoved do
+			(lerping :: { [number]: number })[newIdx] = lerpStartTime
 		end
 	end
 
@@ -698,6 +835,65 @@ function WormService:DamageWorm(
 	if wormData.Segments <= 0 then
 		self:_killWorm(player, attacker)
 	end
+end
+
+--------------------------------------------------
+-- Explosion damage (per-segment radial)
+--------------------------------------------------
+
+-- Apply explosion damage to a worm by damaging every segment whose position is
+-- within `radius` of `center`. The first segment found inside the radius is
+-- treated as the "primary hit" so the cascading HP-removal logic can run, and
+-- each additional in-radius segment beyond that adds extra damage equal to its
+-- own HP plus an overflow buffer so the blast actually carves a chunk out of
+-- the worm rather than just nicking the tail.
+function WormService:ExplodeWorm(player: Player, center: Vector3, radius: number, baseDamage: number, attacker: Player?)
+	local wormData = self._worms[player]
+	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+	local character = player.Character
+	if not character then
+		return
+	end
+	local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+	if not segFolder then
+		return
+	end
+
+	local segCount = math.floor(wormData.Segments)
+	local primaryHit: number? = nil
+	local extraDamage = 0
+	for i = 1, segCount do
+		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
+		if seg and (seg.Position - center).Magnitude <= radius then
+			if not primaryHit then
+				primaryHit = i
+			else
+				local hp = tonumber(seg:GetAttribute("HP")) or WormConfig.SegmentHP
+				extraDamage += hp
+			end
+		end
+	end
+
+	if not primaryHit then
+		-- Nothing inside radius — fall back to a single tail-segment hit so the
+		-- player still gets feedback when they barely clip an enemy.
+		primaryHit = segCount
+	end
+
+	local knockback = (Vector3.new(center.X, 0, center.Z) - Vector3.zero) -- placeholder
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if hrp then
+		local diff = hrp.Position - center
+		if diff.Magnitude > 0.1 then
+			knockback = diff.Unit * 40
+		else
+			knockback = Vector3.zero
+		end
+	end
+
+	self:DamageWorm(player, baseDamage + extraDamage, attacker, knockback, primaryHit, true)
 end
 
 --------------------------------------------------
@@ -942,7 +1138,10 @@ function WormService:_checkBotGhostEating(botName: string, headPos: Vector3)
 	end
 end
 
-function WormService:_updateSegments(player: Player)
+local SEGMENT_LERP_SPEED = 5 -- per-second alpha scalar for gap-fill lerp (slower = more visible slide)
+local SEGMENT_LERP_EPSILON = 0.1 -- distance below which lerping is considered finished
+
+function WormService:_updateSegments(player: Player, dt: number)
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
 		return
@@ -960,6 +1159,7 @@ function WormService:_updateSegments(player: Player)
 
 	-- Place each segment at the position the head was at (index * ENTRIES_PER_SEGMENT) entries ago
 	local segCount = math.floor(wormData.Segments)
+	local lerping = wormData.LerpingSegments
 	for i = 1, segCount do
 		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
 		if not seg then
@@ -968,8 +1168,28 @@ function WormService:_updateSegments(player: Player)
 
 		local histIndex = wormData.HistoryEnd - i * ENTRIES_PER_SEGMENT
 		if histIndex >= wormData.HistoryStart and wormData.PositionHistory[histIndex] then
-			seg.Position = wormData.PositionHistory[histIndex]
+			local target = wormData.PositionHistory[histIndex]
+			local lerpStart = lerping and lerping[i] or nil
+			if lerpStart and os.clock() >= lerpStart then
+				-- Post-delay: slide toward the target position to fill the gap
+				local alpha = math.min(1, dt * SEGMENT_LERP_SPEED)
+				local newPos = seg.Position:Lerp(target, alpha)
+				seg.Position = newPos
+				if (newPos - target).Magnitude < SEGMENT_LERP_EPSILON then
+					lerping[i] = nil
+				end
+			elseif not lerpStart then
+				-- Not lerping: snap to target position from history
+				seg.Position = target
+			end
+			-- Pre-delay (lerpStart set but os.clock() < lerpStart): leave segment in
+			-- place so the destroyed segment's gap is briefly visible.
 		end
+	end
+
+	-- Cleanup empty lerp table
+	if lerping and next(lerping) == nil then
+		wormData.LerpingSegments = nil
 	end
 end
 
@@ -1099,7 +1319,7 @@ function WormService:_gameStep(dt: number)
 		end
 
 		self:_updateMovement(player, dt)
-		self:_updateSegments(player)
+		self:_updateSegments(player, dt)
 
 		local headPos = hrp.Position
 		self:_checkFoodCollection(player, headPos)

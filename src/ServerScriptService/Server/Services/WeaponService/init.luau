@@ -34,6 +34,11 @@ type ProjectileData = {
 	Instance: Part?,
 	-- PowerShot-specific
 	ChargeAlpha: number?,
+	-- Cluster-specific
+	HasSplit: boolean?,
+	-- Mine-specific
+	Armed: boolean?,
+	ArmAt: number?,
 }
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
@@ -56,6 +61,8 @@ local WEAPON_PICKUP_COLORS: { [string]: { number } } = {
 	HighVoltage = { 180, 50, 255 },
 	Grenade = { 236, 140, 70 },
 	PowerShot = { 255, 80, 30 },
+	Cluster = { 90, 200, 120 },
+	Mine = { 200, 60, 60 },
 }
 
 local WeaponService = Knit.CreateService({
@@ -68,6 +75,7 @@ local WeaponService = Knit.CreateService({
 		ProjectileSpawned = Knit.CreateSignal(), -- (projId, weaponType, position, velocity, size)
 		ProjectileExploded = Knit.CreateSignal(), -- (projId, position, radius)
 		ChargeStarted = Knit.CreateSignal(), -- () — tells client charge began
+		ReloadStarted = Knit.CreateSignal(), -- (duration)
 		WeaponPickupSpawned = Knit.CreateSignal(), -- (id, weaponType, position, color)
 		WeaponPickupCollected = Knit.CreateSignal(), -- (id)
 		WeaponPickupDespawned = Knit.CreateSignal(), -- (id)
@@ -78,6 +86,7 @@ local WeaponService = Knit.CreateService({
 
 	_weapons = {} :: { [Player]: { Type: WeaponType, Ammo: number } },
 	_lastShotTimestamps = {} :: { [Player]: number },
+	_reloadingUntil = {} :: { [Player]: number }, -- os.clock() when reload completes
 	_projectiles = {} :: { [number]: ProjectileData },
 	_nextProjectileId = 1,
 	_chargeStarts = {} :: { [Player]: number }, -- os.clock() when charge began
@@ -94,8 +103,8 @@ local WeaponService = Knit.CreateService({
 --------------------------------------------------
 
 function WeaponService:AssignRandomWeapon(player: Player)
-	local names = WeaponConfig.WeaponNames
-	local weaponType = names[math.random(1, #names)]
+	-- Ghosts always start with the Blaster; other weapons must be picked up
+	local weaponType: WeaponType = "Blaster"
 	local weaponDef = WeaponConfig.Weapons[weaponType]
 
 	local isNewGhost = self._weapons[player] == nil
@@ -104,6 +113,7 @@ function WeaponService:AssignRandomWeapon(player: Player)
 		Ammo = weaponDef.Ammo,
 	}
 	self._lastShotTimestamps[player] = 0
+	self._reloadingUntil[player] = nil
 
 	self.Client.WeaponAssigned:Fire(player, weaponType, weaponDef.Ammo)
 
@@ -125,6 +135,7 @@ function WeaponService:AssignWeapon(player: Player, weaponType: WeaponType)
 		Ammo = weaponDef.Ammo,
 	}
 	self._lastShotTimestamps[player] = 0
+	self._reloadingUntil[player] = nil
 
 	self.Client.WeaponAssigned:Fire(player, weaponType, weaponDef.Ammo)
 
@@ -136,6 +147,62 @@ end
 function WeaponService:ClearWeapon(player: Player)
 	self._weapons[player] = nil
 	self._lastShotTimestamps[player] = nil
+	self._reloadingUntil[player] = nil
+end
+
+function WeaponService:_isReloading(player: Player): boolean
+	local until_ = self._reloadingUntil[player]
+	if not until_ then
+		return false
+	end
+	if os.clock() >= until_ then
+		self._reloadingUntil[player] = nil
+		return false
+	end
+	return true
+end
+
+function WeaponService:_startReload(player: Player)
+	local weaponData = self._weapons[player]
+	if not weaponData then
+		return
+	end
+	local weaponDef = WeaponConfig.Weapons[weaponData.Type]
+	if not weaponDef then
+		return
+	end
+	-- Already full or already reloading
+	if weaponData.Ammo >= weaponDef.Ammo then
+		return
+	end
+	if self:_isReloading(player) then
+		return
+	end
+
+	-- Must be a ghost
+	local wormData = WormService:GetWormData_Server(player)
+	if wormData and wormData.State == "Alive" then
+		return
+	end
+
+	local reloadTime = weaponDef.ReloadTime or 2
+	self._reloadingUntil[player] = os.clock() + reloadTime
+	self.Client.ReloadStarted:Fire(player, reloadTime)
+
+	task.delay(reloadTime, function()
+		-- Must still be the same weapon and still exist
+		local data = self._weapons[player]
+		if not data or data.Type ~= weaponDef.Name then
+			return
+		end
+		local until_ = self._reloadingUntil[player]
+		if not until_ or os.clock() < until_ - 0.05 then
+			return -- cancelled or reset
+		end
+		self._reloadingUntil[player] = nil
+		data.Ammo = weaponDef.Ammo
+		self.Client.AmmoChanged:Fire(player, data.Ammo)
+	end)
 end
 
 function WeaponService:GetWeaponData(player: Player): { Type: WeaponType, Ammo: number }?
@@ -155,6 +222,11 @@ function WeaponService:_validateShoot(player: Player, origin: Vector3, direction
 
 	-- Must have ammo
 	if weaponData.Ammo <= 0 then
+		return false
+	end
+
+	-- Cannot shoot while reloading
+	if self:_isReloading(player) then
 		return false
 	end
 
@@ -216,7 +288,7 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 	self._lastShotTimestamps[player] = Workspace:GetServerTimeNow()
 	self.Client.AmmoChanged:Fire(player, weaponData.Ammo)
 
-	-- Server raycast
+	-- Server raycast (with optional pierce: shot continues through segments)
 	local dir = direction.Unit
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -232,15 +304,25 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 	end
 	rayParams.FilterDescendantsInstances = excludeList
 
-	local rayResult = Workspace:Raycast(origin, dir * weaponDef.Range, rayParams)
-
-	local hitPos = if rayResult then rayResult.Position else origin + dir * weaponDef.Range
+	local rayOrigin = origin
+	local remainingRange = weaponDef.Range
+	local pierceLeft = (weaponDef.Pierce or 0) + 1 -- always at least one hit
+	local hitPos = origin + dir * weaponDef.Range
 	local hitPlayerName: string? = nil
 
-	-- Check if we hit a worm segment or head
-	if rayResult and rayResult.Instance then
+	while pierceLeft > 0 and remainingRange > 0 do
+		pierceLeft -= 1
+		local rayResult = Workspace:Raycast(rayOrigin, dir * remainingRange, rayParams)
+		if not rayResult then
+			break
+		end
+		hitPos = rayResult.Position
+		local stepDist = (hitPos - rayOrigin).Magnitude
+		remainingRange -= stepDist + 0.05
+
 		local hitPart = rayResult.Instance
 		local hitModel = hitPart:FindFirstAncestorOfClass("Model")
+		local pierced = false
 
 		if hitModel then
 			-- Check if it's a player worm
@@ -256,15 +338,18 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 						if string.sub(hitPart.Name, 1, 7) == "Segment" then
 							hitSegmentIndex = tonumber(string.sub(hitPart.Name, 8))
 						end
+						-- Weapon hits cascade damage across segments via segment HP
 						WormService:DamageWorm(
 							hitPlayer,
 							weaponDef.Damage,
 							player,
 							dir * weaponDef.Knockback,
-							hitSegmentIndex
+							hitSegmentIndex,
+							true
 						)
 						self.Client.HitConfirmed:Fire(player, hitPlayer.Name, weaponDef.Damage)
 						self.WeaponHit:Fire(player, hitPlayer, weaponDef.Damage)
+						pierced = true
 					end
 				end
 			else
@@ -273,12 +358,17 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 				local wormHead = hitModel:FindFirstChild("WormHead")
 				if (segFolder or wormHead) and not TeamService:AreTeammates(player.Name, hitModel.Name) then
 					hitPlayerName = hitModel.Name
-					BotService:DamageBot(hitModel.Name, weaponDef.Damage, player.Name)
+					local botHitSegmentIndex: number? = nil
+					if string.sub(hitPart.Name, 1, 7) == "Segment" then
+						botHitSegmentIndex = tonumber(string.sub(hitPart.Name, 8))
+					end
+					BotService:DamageBot(hitModel.Name, weaponDef.Damage, player.Name, botHitSegmentIndex, true)
+					pierced = true
 				end
 			end
 
-			-- Check if we hit another ghost
-			if not hitPlayerName and hitModel:GetAttribute("IsGhost") then
+			-- Check if we hit another ghost (ghosts do not allow pierce-through)
+			if not pierced and hitModel:GetAttribute("IsGhost") then
 				local ghostOwnerName = hitModel:GetAttribute("GhostOwner")
 				if ghostOwnerName and ghostOwnerName ~= player.Name then
 					hitPlayerName = ghostOwnerName .. " (ghost)"
@@ -318,6 +408,16 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 				end
 			end
 		end
+
+		if pierced then
+			-- Continue past this hit: exclude the part and advance origin
+			table.insert(excludeList, hitPart)
+			rayParams.FilterDescendantsInstances = excludeList
+			rayOrigin = hitPos + dir * 0.05
+		else
+			-- Terrain or non-pierceable hit — stop here
+			break
+		end
 	end
 
 	-- Replicate shot to all players for visuals
@@ -334,6 +434,10 @@ function WeaponService:_validateProjectileShoot(player: Player, origin: Vector3,
 		return false
 	end
 	if weaponData.Ammo <= 0 then
+		return false
+	end
+
+	if self:_isReloading(player) then
 		return false
 	end
 
@@ -497,8 +601,12 @@ function WeaponService:_explodeProjectile(projData: ProjectileData)
 	-- Notify clients
 	self.Client.ProjectileExploded:FireAll(projData.Id, pos, radius)
 
-	-- Damage all enemy worms in radius
-	-- Check player worms
+	-- Damage all enemy worms whose segments intersect the blast radius.
+	-- ExplodeWorm scans every segment within `radius` and applies cumulative damage,
+	-- so a grenade actually carves a chunk out of the worm rather than nicking one
+	-- segment at the tail.
+	local checkRadius = radius + WormConfig.SegmentSize -- catch segments whose centres sit just outside
+
 	for player, wormData in WormService._worms do
 		if wormData.State ~= "Alive" then
 			continue
@@ -516,10 +624,9 @@ function WeaponService:_explodeProjectile(projData: ProjectileData)
 			continue
 		end
 
-		if (hrp.Position - pos).Magnitude <= radius then
-			local dir = (hrp.Position - pos)
-			local knockback = if dir.Magnitude > 0.1 then dir.Unit * 40 else Vector3.zero
-			WormService:DamageWorm(player, damage, shooter, knockback)
+		-- Coarse check on the head, then per-segment radial damage
+		if (hrp.Position - pos).Magnitude <= radius + 30 then
+			WormService:ExplodeWorm(player, pos, checkRadius, damage, shooter)
 			self.Client.HitConfirmed:Fire(shooter, player.Name, damage)
 		end
 	end
@@ -533,9 +640,8 @@ function WeaponService:_explodeProjectile(projData: ProjectileData)
 		if not botHrp then
 			continue
 		end
-		if (botHrp.Position - pos).Magnitude <= radius then
-			-- Bot segment damage: use BotService internal method
-			BotService:DamageBot(botName, damage, shooter.Name)
+		if (botHrp.Position - pos).Magnitude <= radius + 30 then
+			BotService:ExplodeBot(botName, pos, checkRadius, damage, shooter.Name)
 		end
 	end
 
@@ -557,6 +663,12 @@ function WeaponService:_updateProjectiles(dt: number)
 			self:_updateGrenade(projData, dt)
 		elseif projData.WeaponType == "PowerShot" then
 			self:_updatePowerShot(projData, dt)
+		elseif projData.WeaponType == "Cluster" then
+			self:_updateCluster(projData, dt)
+		elseif projData.WeaponType == "Bomblet" then
+			self:_updateBomblet(projData, dt)
+		elseif projData.WeaponType == "Mine" then
+			self:_updateMine(projData, dt)
 		end
 	end
 end
@@ -698,6 +810,321 @@ function WeaponService:_updatePowerShot(projData: ProjectileData, _dt: number)
 end
 
 --------------------------------------------------
+-- Cluster bomb
+--------------------------------------------------
+
+function WeaponService:_spawnCluster(player: Player, origin: Vector3, direction: Vector3)
+	local weaponData = self._weapons[player]
+	local weaponDef = WeaponConfig.Weapons[weaponData.Type]
+
+	weaponData.Ammo -= 1
+	self._lastShotTimestamps[player] = Workspace:GetServerTimeNow()
+	self.Client.AmmoChanged:Fire(player, weaponData.Ammo)
+
+	local dir = direction.Unit
+	-- High arc: throw forward with strong upward component
+	local velocity = dir * weaponDef.LaunchForce + Vector3.new(0, weaponDef.LaunchForce * 0.8, 0)
+
+	local projId = self._nextProjectileId
+	self._nextProjectileId += 1
+
+	local shell = Instance.new("Part")
+	shell.Name = "Cluster_" .. projId
+	shell.Shape = Enum.PartType.Ball
+	shell.Size = Vector3.new(1.4, 1.4, 1.4)
+	shell.Color = Color3.fromRGB(90, 200, 120)
+	shell.Material = Enum.Material.Metal
+	shell.Anchored = true
+	shell.CanCollide = false
+	shell.CanQuery = false
+	shell.Position = origin
+	shell.Parent = workspace
+
+	local projData: ProjectileData = {
+		Id = projId,
+		Player = player,
+		WeaponType = "Cluster",
+		Position = origin,
+		Velocity = velocity,
+		Origin = origin,
+		Time = 0,
+		TotalTime = 0,
+		Bounces = 0,
+		Stopped = false,
+		Damage = weaponDef.Damage,
+		ExplosionRadius = weaponDef.ExplosionRadius :: number,
+		Instance = shell,
+		HasSplit = false,
+	}
+
+	self._projectiles[projId] = projData
+	self.Client.ProjectileSpawned:FireAll(projId, "Cluster", origin, velocity, 1.4)
+end
+
+function WeaponService:_updateCluster(projData: ProjectileData, dt: number)
+	local weaponDef = WeaponConfig.Weapons.Cluster
+
+	-- Apply gravity
+	projData.Velocity = projData.Velocity + Vector3.new(0, -(weaponDef.Gravity :: number) * dt, 0)
+	projData.Position = projData.Position + projData.Velocity * dt
+	if projData.Instance then
+		projData.Instance.Position = projData.Position
+	end
+
+	-- Split when fuse expires OR when shell starts falling (apex)
+	if not projData.HasSplit and (projData.Velocity.Y < 0 or projData.TotalTime >= (weaponDef.FuseTime :: number)) then
+		projData.HasSplit = true
+		self:_splitCluster(projData)
+	end
+end
+
+function WeaponService:_splitCluster(projData: ProjectileData)
+	local weaponDef = WeaponConfig.Weapons.Cluster
+	local count = (weaponDef.BombletCount :: number) or 5
+	local spread = (weaponDef.BombletSpread :: number) or 0.6
+	local center = projData.Position
+	local shooter = projData.Player
+
+	-- Destroy carrier shell
+	if projData.Instance then
+		projData.Instance:Destroy()
+		projData.Instance = nil
+	end
+	self.Client.ProjectileExploded:FireAll(projData.Id, center, 1) -- visual puff
+	self._projectiles[projData.Id] = nil
+
+	-- Spawn bomblets in a horizontal cone, all flung outward + slightly up
+	for i = 1, count do
+		local angle = (i - 1) / count * math.pi * 2 + math.random() * 0.2
+		local horiz = Vector3.new(math.cos(angle), 0, math.sin(angle))
+		local outward = horiz * (8 + math.random() * 4) + Vector3.new(0, 6 + math.random() * 3, 0)
+		-- Add a small random pitch via spread
+		outward = outward + horiz * spread * 4
+
+		local bombletId = self._nextProjectileId
+		self._nextProjectileId += 1
+
+		local part = Instance.new("Part")
+		part.Name = "Bomblet_" .. bombletId
+		part.Shape = Enum.PartType.Ball
+		part.Size = Vector3.new(0.7, 0.7, 0.7)
+		part.Color = Color3.fromRGB(120, 220, 140)
+		part.Material = Enum.Material.Metal
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.Position = center
+		part.Parent = workspace
+
+		local bombletData: ProjectileData = {
+			Id = bombletId,
+			Player = shooter,
+			WeaponType = "Bomblet",
+			Position = center,
+			Velocity = outward,
+			Origin = center,
+			Time = 0,
+			TotalTime = 0,
+			Bounces = 0,
+			Stopped = false,
+			Damage = (weaponDef.BombletDamage :: number) or 3,
+			ExplosionRadius = (weaponDef.BombletExplosionRadius :: number) or 8,
+			Instance = part,
+		}
+		self._projectiles[bombletId] = bombletData
+		self.Client.ProjectileSpawned:FireAll(bombletId, "Bomblet", center, outward, 0.7)
+	end
+end
+
+function WeaponService:_updateBomblet(projData: ProjectileData, dt: number)
+	local weaponDef = WeaponConfig.Weapons.Cluster
+	local fuse = (weaponDef.BombletFuse :: number) or 0.9
+
+	-- Gravity
+	projData.Velocity = projData.Velocity + Vector3.new(0, -(weaponDef.Gravity :: number) * dt, 0)
+	local newPos = projData.Position + projData.Velocity * dt
+
+	-- Cheap raycast to detect ground for bomblets so they don't fall forever
+	local rayDir = newPos - projData.Position
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	local excludeList = {}
+	if projData.Player.Character then
+		table.insert(excludeList, projData.Player.Character)
+	end
+	local foodFolder = Workspace:FindFirstChild("Food")
+	if foodFolder then
+		table.insert(excludeList, foodFolder)
+	end
+	rayParams.FilterDescendantsInstances = excludeList
+
+	local rayResult = Workspace:Raycast(projData.Position, rayDir, rayParams)
+	if rayResult then
+		projData.Position = rayResult.Position + rayResult.Normal * 0.2
+		projData.Velocity = Vector3.zero
+	else
+		projData.Position = newPos
+	end
+	if projData.Instance then
+		projData.Instance.Position = projData.Position
+	end
+
+	-- Detonate after fuse
+	if projData.TotalTime >= fuse then
+		self:_explodeProjectile(projData)
+	end
+end
+
+--------------------------------------------------
+-- Mine
+--------------------------------------------------
+
+function WeaponService:_spawnMine(player: Player, origin: Vector3, direction: Vector3)
+	local weaponData = self._weapons[player]
+	local weaponDef = WeaponConfig.Weapons[weaponData.Type]
+
+	weaponData.Ammo -= 1
+	self._lastShotTimestamps[player] = Workspace:GetServerTimeNow()
+	self.Client.AmmoChanged:Fire(player, weaponData.Ammo)
+
+	local dir = direction.Unit
+	-- Short underhand toss
+	local velocity = dir * weaponDef.LaunchForce + Vector3.new(0, weaponDef.LaunchForce * 0.4, 0)
+
+	local projId = self._nextProjectileId
+	self._nextProjectileId += 1
+
+	local mine = Instance.new("Part")
+	mine.Name = "Mine_" .. projId
+	mine.Shape = Enum.PartType.Cylinder
+	mine.Size = Vector3.new(0.4, 1.6, 1.6)
+	mine.Color = Color3.fromRGB(200, 60, 60)
+	mine.Material = Enum.Material.Metal
+	mine.Anchored = true
+	mine.CanCollide = false
+	mine.CanQuery = false
+	mine.Position = origin
+	mine.Parent = workspace
+
+	local projData: ProjectileData = {
+		Id = projId,
+		Player = player,
+		WeaponType = "Mine",
+		Position = origin,
+		Velocity = velocity,
+		Origin = origin,
+		Time = 0,
+		TotalTime = 0,
+		Bounces = 0,
+		Stopped = false,
+		Damage = weaponDef.Damage,
+		ExplosionRadius = (weaponDef.ExplosionRadius :: number) or 13,
+		Instance = mine,
+		Armed = false,
+		ArmAt = (weaponDef.ArmTime :: number) or 0.6,
+	}
+
+	self._projectiles[projId] = projData
+	self.Client.ProjectileSpawned:FireAll(projId, "Mine", origin, velocity, 1.6)
+end
+
+function WeaponService:_updateMine(projData: ProjectileData, dt: number)
+	local weaponDef = WeaponConfig.Weapons.Mine
+	local lifetime = (weaponDef.MineLifetime :: number) or 30
+	local triggerRadius = (weaponDef.TriggerRadius :: number) or 5
+
+	-- Self-destruct on lifetime
+	if projData.TotalTime >= lifetime then
+		self:_explodeProjectile(projData)
+		return
+	end
+
+	if not projData.Stopped then
+		-- Apply gravity and arc
+		projData.Velocity = projData.Velocity + Vector3.new(0, -(weaponDef.Gravity :: number) * dt, 0)
+		local newPos = projData.Position + projData.Velocity * dt
+
+		local rayDir = newPos - projData.Position
+		local rayParams = RaycastParams.new()
+		rayParams.FilterType = Enum.RaycastFilterType.Exclude
+		local excludeList = {}
+		if projData.Player.Character then
+			table.insert(excludeList, projData.Player.Character)
+		end
+		local foodFolder = Workspace:FindFirstChild("Food")
+		if foodFolder then
+			table.insert(excludeList, foodFolder)
+		end
+		rayParams.FilterDescendantsInstances = excludeList
+
+		local rayResult = Workspace:Raycast(projData.Position, rayDir, rayParams)
+		if rayResult then
+			projData.Position = rayResult.Position + rayResult.Normal * 0.2
+			projData.Velocity = Vector3.zero
+			projData.Stopped = true
+		else
+			projData.Position = newPos
+		end
+		if projData.Instance then
+			projData.Instance.Position = projData.Position
+		end
+	end
+
+	-- Arm after delay
+	if not projData.Armed and projData.TotalTime >= (projData.ArmAt or 0.6) then
+		projData.Armed = true
+		if projData.Instance then
+			projData.Instance.Color = Color3.fromRGB(255, 160, 30)
+		end
+	end
+
+	-- Once armed and stopped, scan for nearby enemy worms
+	if projData.Armed and projData.Stopped then
+		local center = projData.Position
+		local shooter = projData.Player
+
+		for player, wormData in WormService._worms do
+			if wormData.State ~= "Alive" then
+				continue
+			end
+			if TeamService:AreTeammates(shooter.Name, player.Name) then
+				continue
+			end
+			local char = player.Character
+			if not char then
+				continue
+			end
+			local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+			if hrp and (hrp.Position - center).Magnitude <= triggerRadius then
+				self:_explodeProjectile(projData)
+				return
+			end
+			-- Also check segments to handle long worms
+			local segFolder = char:FindFirstChild("WormSegments")
+			if segFolder then
+				for _, seg in segFolder:GetChildren() do
+					if seg:IsA("BasePart") and (seg.Position - center).Magnitude <= triggerRadius then
+						self:_explodeProjectile(projData)
+						return
+					end
+				end
+			end
+		end
+
+		for botName, botInfo in WormService._botModels do
+			if TeamService:AreTeammates(shooter.Name, botName) then
+				continue
+			end
+			local botHrp = botInfo.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
+			if botHrp and (botHrp.Position - center).Magnitude <= triggerRadius then
+				self:_explodeProjectile(projData)
+				return
+			end
+		end
+	end
+end
+
+--------------------------------------------------
 -- Weapon pickups (ghost-only)
 --------------------------------------------------
 
@@ -714,8 +1141,14 @@ function WeaponService:_spawnPickup()
 		return
 	end
 
-	local names = WeaponConfig.WeaponNames
-	local weaponType = names[math.random(1, #names)]
+	-- Pickups only spawn the special weapons — Blaster is the default starter
+	local pickupChoices = {}
+	for _, name in WeaponConfig.WeaponNames do
+		if name ~= "Blaster" then
+			table.insert(pickupChoices, name)
+		end
+	end
+	local weaponType = pickupChoices[math.random(1, #pickupChoices)]
 	local x = math.random(-HALF_ARENA + 100, HALF_ARENA - 100)
 	local z = math.random(-HALF_ARENA + 100, HALF_ARENA - 100)
 	local position = Vector3.new(x, 3, z)
@@ -842,6 +1275,34 @@ function WeaponService.Client:ThrowGrenade(player: Player, origin: Vector3, dire
 	self.Server:_spawnGrenade(player, origin, direction)
 end
 
+function WeaponService.Client:ThrowCluster(player: Player, origin: Vector3, direction: Vector3)
+	if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
+		return
+	end
+	local weaponData = self.Server._weapons[player]
+	if not weaponData or weaponData.Type ~= "Cluster" then
+		return
+	end
+	if not self.Server:_validateProjectileShoot(player, origin, direction) then
+		return
+	end
+	self.Server:_spawnCluster(player, origin, direction)
+end
+
+function WeaponService.Client:DeployMine(player: Player, origin: Vector3, direction: Vector3)
+	if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" then
+		return
+	end
+	local weaponData = self.Server._weapons[player]
+	if not weaponData or weaponData.Type ~= "Mine" then
+		return
+	end
+	if not self.Server:_validateProjectileShoot(player, origin, direction) then
+		return
+	end
+	self.Server:_spawnMine(player, origin, direction)
+end
+
 function WeaponService.Client:StartCharge(player: Player)
 	local weaponData = self.Server._weapons[player]
 	if not weaponData or weaponData.Type ~= "PowerShot" then
@@ -879,6 +1340,10 @@ function WeaponService.Client:ReleasePowerShot(player: Player, origin: Vector3, 
 	self.Server:_spawnPowerShot(player, origin, direction, chargeAlpha)
 end
 
+function WeaponService.Client:Reload(player: Player)
+	self.Server:_startReload(player)
+end
+
 function WeaponService.Client:CollectWeaponPickup(player: Player, pickupId: number)
 	if type(pickupId) ~= "number" then
 		return
@@ -899,6 +1364,7 @@ function WeaponService:KnitInit()
 		self._weapons[player] = nil
 		self._lastShotTimestamps[player] = nil
 		self._chargeStarts[player] = nil
+		self._reloadingUntil[player] = nil
 	end)
 end
 
@@ -906,6 +1372,10 @@ function WeaponService:KnitStart()
 	WormService = require(script.Parent.WormService)
 	TeamService = require(script.Parent.TeamService)
 	BotService = require(script.Parent.BotService)
+
+	-- Register Cmdr commands (ghost-mode, swap-weapon)
+	local CmdrService = Knit.GetService("CmdrService")
+	CmdrService:RegisterCmdrContent(script)
 
 	-- Projectile + pickup update loop
 	RunService.Heartbeat:Connect(function(dt: number)

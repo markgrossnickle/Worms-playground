@@ -27,6 +27,8 @@ local WeaponController = Knit.CreateController({
 	AmmoChanged = Signal.new(), -- (ammo)
 	HitConfirmed = Signal.new(), -- (targetName, damage)
 	WeaponCleared = Signal.new(),
+	ReloadStarted = Signal.new(), -- (duration)
+	ReloadFinished = Signal.new(),
 
 	_trove = nil :: any,
 	_weaponService = nil :: any,
@@ -37,6 +39,9 @@ local WeaponController = Knit.CreateController({
 	_holding = false, -- for auto-fire (RapidFire)
 	_charging = false, -- for PowerShot charge
 	_chargeStartTime = 0,
+	_reloading = false,
+	_reloadEndTime = 0,
+	_maxAmmo = 0,
 
 	-- Weapon pickup visuals (client-side only)
 	_pickupVisuals = {} :: { [number]: { Part: Part, BaseY: number, WeaponType: string, Position: Vector3 } },
@@ -65,11 +70,32 @@ function WeaponController:_getAimRay(): (Vector3?, Vector3?)
 	return origin, direction
 end
 
+function WeaponController:TryReload()
+	if not self._weaponType then
+		return
+	end
+	if self._reloading then
+		return
+	end
+	if self._ammo >= self._maxAmmo then
+		return
+	end
+	if not self._wormController._inGhostMode then
+		return
+	end
+	self._weaponService:Reload()
+end
+
 function WeaponController:TryShoot()
 	if not self._weaponType then
 		return
 	end
 	if self._ammo <= 0 then
+		-- Auto-reload when trying to shoot with empty mag
+		self:TryReload()
+		return
+	end
+	if self._reloading then
 		return
 	end
 	if not self._wormController._inGhostMode then
@@ -128,6 +154,10 @@ function WeaponController:TryThrowGrenade()
 		return
 	end
 	if self._ammo <= 0 then
+		self:TryReload()
+		return
+	end
+	if self._reloading then
 		return
 	end
 	if not self._wormController._inGhostMode then
@@ -153,11 +183,83 @@ function WeaponController:TryThrowGrenade()
 	self._weaponService:ThrowGrenade(origin, direction)
 end
 
+function WeaponController:TryThrowCluster()
+	if self._weaponType ~= "Cluster" then
+		return
+	end
+	if self._ammo <= 0 then
+		self:TryReload()
+		return
+	end
+	if self._reloading then
+		return
+	end
+	if not self._wormController._inGhostMode then
+		return
+	end
+
+	local weaponDef = WeaponConfig.Weapons.Cluster
+	local minInterval = 60 / weaponDef.FireRate
+	local now = os.clock()
+	if (now - self._lastShotTime) < (minInterval - WeaponConfig.FireRateTolerance) then
+		return
+	end
+
+	local origin, direction = self:_getAimRay()
+	if not origin or not direction then
+		return
+	end
+
+	self._lastShotTime = now
+	self._ammo -= 1
+	self.AmmoChanged:Fire(self._ammo)
+
+	self._weaponService:ThrowCluster(origin, direction)
+end
+
+function WeaponController:TryDeployMine()
+	if self._weaponType ~= "Mine" then
+		return
+	end
+	if self._ammo <= 0 then
+		self:TryReload()
+		return
+	end
+	if self._reloading then
+		return
+	end
+	if not self._wormController._inGhostMode then
+		return
+	end
+
+	local weaponDef = WeaponConfig.Weapons.Mine
+	local minInterval = 60 / weaponDef.FireRate
+	local now = os.clock()
+	if (now - self._lastShotTime) < (minInterval - WeaponConfig.FireRateTolerance) then
+		return
+	end
+
+	local origin, direction = self:_getAimRay()
+	if not origin or not direction then
+		return
+	end
+
+	self._lastShotTime = now
+	self._ammo -= 1
+	self.AmmoChanged:Fire(self._ammo)
+
+	self._weaponService:DeployMine(origin, direction)
+end
+
 function WeaponController:StartPowerShotCharge()
 	if self._weaponType ~= "PowerShot" then
 		return
 	end
 	if self._ammo <= 0 then
+		self:TryReload()
+		return
+	end
+	if self._reloading then
 		return
 	end
 	if not self._wormController._inGhostMode then
@@ -455,11 +557,31 @@ function WeaponController:_setupInput()
 		then
 			if self._weaponType == "Grenade" then
 				self:TryThrowGrenade()
+			elseif self._weaponType == "Cluster" then
+				self:TryThrowCluster()
+			elseif self._weaponType == "Mine" then
+				self:TryDeployMine()
 			elseif self._weaponType == "PowerShot" then
 				self:StartPowerShotCharge()
 			else
 				self._holding = true
 				self:TryShoot()
+			end
+		end
+	end)
+
+	-- Reload key — handled separately so it works regardless of selected slot
+	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
+		if processed then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.R or input.KeyCode == Enum.KeyCode.ButtonX then
+			if self._wormController._inGhostMode and self._weaponType then
+				-- Ensure weapon slot is selected so reload+shoot flow makes sense
+				if self._wormController:GetSelectedSlot() ~= 2 then
+					self._wormController:SetSelectedSlot(2)
+				end
+				self:TryReload()
 			end
 		end
 	end)
@@ -500,7 +622,9 @@ function WeaponController:_connectSignals()
 	self._trove:Add(self._weaponService.WeaponAssigned:Connect(function(weaponType: string, ammo: number)
 		self._weaponType = weaponType
 		self._ammo = ammo
+		self._maxAmmo = ammo
 		self._lastShotTime = 0
+		self._reloading = false
 		self.WeaponAssigned:Fire(weaponType, ammo)
 		-- Auto-select weapon slot when a weapon is assigned
 		self._wormController:SetSelectedSlot(2)
@@ -508,7 +632,17 @@ function WeaponController:_connectSignals()
 
 	self._trove:Add(self._weaponService.AmmoChanged:Connect(function(ammo: number)
 		self._ammo = ammo
+		if self._reloading and ammo >= self._maxAmmo then
+			self._reloading = false
+			self.ReloadFinished:Fire()
+		end
 		self.AmmoChanged:Fire(ammo)
+	end))
+
+	self._trove:Add(self._weaponService.ReloadStarted:Connect(function(duration: number)
+		self._reloading = true
+		self._reloadEndTime = os.clock() + duration
+		self.ReloadStarted:Fire(duration)
 	end))
 
 	self._trove:Add(self._weaponService.HitConfirmed:Connect(function(targetName: string, damage: number)
@@ -560,8 +694,10 @@ function WeaponController:_connectSignals()
 		if not isGhost then
 			self._weaponType = nil
 			self._ammo = 0
+			self._maxAmmo = 0
 			self._holding = false
 			self._charging = false
+			self._reloading = false
 			self:_clearAllPickupVisuals()
 			self.WeaponCleared:Fire()
 		end
@@ -578,6 +714,23 @@ end
 
 function WeaponController:GetAmmo(): number
 	return self._ammo
+end
+
+function WeaponController:IsReloading(): boolean
+	return self._reloading
+end
+
+function WeaponController:GetReloadAlpha(): number
+	if not self._reloading then
+		return 0
+	end
+	local weaponDef = WeaponConfig.Weapons[self._weaponType or ""]
+	if not weaponDef then
+		return 0
+	end
+	local reloadTime = weaponDef.ReloadTime or 2
+	local remaining = self._reloadEndTime - os.clock()
+	return math.clamp(1 - remaining / reloadTime, 0, 1)
 end
 
 --------------------------------------------------
@@ -602,7 +755,9 @@ function WeaponController:KnitStart()
 	if ok and data then
 		self._weaponType = data.Type
 		self._ammo = data.Ammo
-		self.WeaponAssigned:Fire(data.Type, data.Ammo)
+		local weaponDef = WeaponConfig.Weapons[data.Type]
+		self._maxAmmo = if weaponDef then weaponDef.Ammo else data.Ammo
+		self.WeaponAssigned:Fire(data.Type, self._maxAmmo)
 	end
 end
 

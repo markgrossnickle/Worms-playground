@@ -14,7 +14,8 @@ return {
 	-- Segments
 	SegmentSpacing = 1.5,
 	SegmentSize = 2.5,
-	InitialSegments = 3,
+	SegmentHP = 3, -- hit points per segment; weapon damage depletes this; destroyed on <= 0
+	InitialSegments = 8,
 
 	-- Food
 	MaxFoodOnMap = 400,
