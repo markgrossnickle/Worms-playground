@@ -80,6 +80,8 @@ local WormController = Knit.CreateController({
 	_grapplePullDuration = 0.3,
 	_grapplePullStartPos = nil :: Vector3?,
 	_rideWeld = nil :: WeldConstraint?,
+	_grappleGroundTarget = nil :: Vector3?, -- ground-pull target position
+	_grappleGroundPart = nil :: BasePart?, -- temp part for beam attachment
 
 	-- Tool slot selection (ghost mode)
 	_selectedSlot = 1 :: number, -- 1 = Grapple, 2 = Weapon
@@ -369,18 +371,25 @@ function WormController:_setupInput()
 
 	-- Keyboard/mouse boost: hold Shift or left mouse button (skip in ghost mode)
 	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
-		if processed or self._inGhostMode then
+		-- Ground grapple: right-click or E key when alive (works even if processed).
+		-- Must be checked BEFORE the ghost-mode early return so that grapple input
+		-- is never silently swallowed.
+		if self._alive and not self._inGhostMode then
+			if input.UserInputType == Enum.UserInputType.MouseButton2 or input.KeyCode == Enum.KeyCode.E then
+				self:_fireGroundGrapple()
+			end
+		end
+
+		if self._inGhostMode then
 			return
 		end
 
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.LeftShift then
-			self:SetBoosting(true)
-		end
-
-		-- Ground grapple: right-click or E key when alive
-		if self._alive then
-			if input.UserInputType == Enum.UserInputType.MouseButton2 or input.KeyCode == Enum.KeyCode.E then
-				self:_fireGroundGrapple()
+		if not processed then
+			if
+				input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.KeyCode == Enum.KeyCode.LeftShift
+			then
+				self:SetBoosting(true)
 			end
 		end
 	end)
@@ -520,6 +529,7 @@ function WormController:_connectServerSignals()
 				self._spectateTarget = nil
 				self._spectateTargetModel = nil
 				self:_setupCamera()
+				self:_updateCamera() -- Position camera immediately so the first frame isn't misplaced
 				self.WormSpawned:Fire(data)
 			end
 		)
@@ -911,9 +921,6 @@ end
 --------------------------------------------------
 
 function WormController:_getGroundGrappleTarget(): Vector3?
-	local mouse = LocalPlayer:GetMouse()
-	local ray = Camera:ScreenPointToRay(mouse.X, mouse.Y)
-
 	local character = LocalPlayer.Character
 	if not character then
 		return nil
@@ -923,7 +930,19 @@ function WormController:_getGroundGrappleTarget(): Vector3?
 		return nil
 	end
 
-	-- Intersect with terrain plane
+	-- Use the same input + plane-intersection approach as _getWorldDirection
+	-- (which is proven to work for steering the worm every frame).
+	local screenX, screenY
+	if self._isTouchDevice and self._touchPosition then
+		screenX = self._touchPosition.X
+		screenY = self._touchPosition.Y
+	else
+		local mouse = LocalPlayer:GetMouse()
+		screenX = mouse.X
+		screenY = mouse.Y
+	end
+
+	local ray = Camera:ScreenPointToRay(screenX, screenY)
 	local planeY = hrp.Position.Y
 	if ray.Direction.Y == 0 then
 		return nil
@@ -934,12 +953,16 @@ function WormController:_getGroundGrappleTarget(): Vector3?
 	end
 
 	local hitPoint = ray.Origin + ray.Direction * t
-	local dist = (hitPoint - hrp.Position).Magnitude
-	if dist > WormConfig.Grapple.Range then
+	local flatDist = ((hitPoint - hrp.Position) * Vector3.new(1, 0, 1)).Magnitude
+	if flatDist < 3 or flatDist > WormConfig.Grapple.Range then
 		return nil
 	end
 
-	return Vector3.new(hitPoint.X, TerrainHeight.getHeight(hitPoint.X, hitPoint.Z) + 1, hitPoint.Z)
+	return Vector3.new(
+		hitPoint.X,
+		TerrainHeight.getSmoothSurfaceY(hitPoint.X, hitPoint.Z) + WormConfig.SegmentSize / 2,
+		hitPoint.Z
+	)
 end
 
 function WormController:_fireGroundGrapple()
@@ -1071,6 +1094,55 @@ function WormController:_findWormUnderCursor(): (BasePart?, Model?)
 	return nil, nil
 end
 
+function WormController:_findGroundUnderCursor(): Vector3?
+	local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+	local ray = Camera:ViewportPointToRay(screenCenter.X, screenCenter.Y)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Include
+	rayParams.FilterDescendantsInstances = { workspace.Terrain }
+
+	local result = workspace:Raycast(ray.Origin, ray.Direction * GRAPPLE_RANGE * 3, rayParams)
+	if result then
+		return result.Position
+	end
+	return nil
+end
+
+function WormController:_startGroundGrapplePull(targetPos: Vector3)
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	self._grappleState = "PULLING"
+	self._grappleGroundTarget = targetPos
+	self._grappleTarget = nil
+	self._grappleTargetName = nil
+	self._grapplePullStart = os.clock()
+	-- Scale pull duration with distance so it feels consistent
+	local dist = (targetPos - hrp.Position).Magnitude
+	self._grapplePullDuration = math.clamp(dist / 150, 0.15, 0.6)
+	self._grapplePullStartPos = hrp.Position
+
+	-- Create a small invisible anchored part at the ground target for the beam
+	local groundPart = Instance.new("Part")
+	groundPart.Name = "GrappleGroundAnchor"
+	groundPart.Size = Vector3.new(0.5, 0.5, 0.5)
+	groundPart.Position = targetPos
+	groundPart.Anchored = true
+	groundPart.CanCollide = false
+	groundPart.Transparency = 1
+	groundPart.Parent = workspace
+	self._grappleGroundPart = groundPart
+
+	self:_createBeam(hrp, groundPart)
+end
+
 function WormController:_updateGrappleHighlight(wormHead: BasePart?, wormModel: Model?)
 	-- Remove old highlight if target changed
 	if self._grappleHighlight then
@@ -1172,18 +1244,29 @@ function WormController:_updateGrapplePull()
 		self:_detachGrapple()
 		return
 	end
+
+	local elapsed = os.clock() - self._grapplePullStart
+	local alpha = math.clamp(elapsed / self._grapplePullDuration, 0, 1)
+	local startPos = self._grapplePullStartPos :: Vector3
+
+	-- Ground pull: lerp to static position, then detach (no ride)
+	if self._grappleGroundTarget then
+		local targetPos = self._grappleGroundTarget + Vector3.new(0, 3, 0) -- land slightly above ground
+		hrp.CFrame = CFrame.new(startPos:Lerp(targetPos, alpha))
+		if alpha >= 1 then
+			self:_detachGrapple()
+		end
+		return
+	end
+
+	-- Worm pull: lerp to moving worm head, then attach/ride
 	local targetHead = self._grappleTarget
 	if not targetHead or not targetHead.Parent then
 		self:_detachGrapple()
 		return
 	end
 
-	local elapsed = os.clock() - self._grapplePullStart
-	local alpha = math.clamp(elapsed / self._grapplePullDuration, 0, 1)
-
-	local startPos = self._grapplePullStartPos :: Vector3
 	local targetPos = targetHead.Position + Vector3.new(0, 2, 0) -- sit on top
-
 	hrp.CFrame = CFrame.new(startPos:Lerp(targetPos, alpha))
 
 	if alpha >= 1 then
@@ -1267,10 +1350,17 @@ function WormController:_detachGrapple()
 		end
 	end
 
+	-- Clean ground anchor part
+	if self._grappleGroundPart then
+		self._grappleGroundPart:Destroy()
+		self._grappleGroundPart = nil
+	end
+
 	self._grappleState = "IDLE"
 	self._grappleTarget = nil
 	self._grappleTargetName = nil
 	self._grapplePullStartPos = nil
+	self._grappleGroundTarget = nil
 end
 
 function WormController:_onKnockoff(knockbackDir: Vector3)
@@ -1305,13 +1395,8 @@ function WormController:_onKnockoff(knockbackDir: Vector3)
 	end
 end
 
-function WormController:_onGhostClick()
+function WormController:_onGhostGrapple()
 	if not self._inGhostMode then
-		return
-	end
-
-	-- Only handle grapple actions when Grapple slot (1) is selected
-	if self._selectedSlot ~= 1 then
 		return
 	end
 
@@ -1324,10 +1409,17 @@ function WormController:_onGhostClick()
 		return -- Already pulling, ignore
 	end
 
-	-- Try to grapple a worm
+	-- Try to grapple a worm first, then fall back to ground
 	local wormHead, wormModel = self:_findWormUnderCursor()
 	if wormHead and wormModel then
 		self:_startGrapplePull(wormHead, wormModel)
+		return
+	end
+
+	-- No worm found — try ground grapple
+	local groundPos = self:_findGroundUnderCursor()
+	if groundPos then
+		self:_startGroundGrapplePull(groundPos)
 	end
 end
 
@@ -1373,21 +1465,11 @@ function WormController:_setupGhostInput()
 			return
 		end
 
-		if
-			input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch
-			or input.KeyCode == Enum.KeyCode.ButtonR2
-		then
-			self:_onGhostClick()
+		-- Right-click / LT = grapple
+		if input.UserInputType == Enum.UserInputType.MouseButton2 or input.KeyCode == Enum.KeyCode.ButtonL2 then
+			self:_onGhostGrapple()
 		elseif input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonB then
 			self:_onGhostSpace()
-		elseif input.KeyCode == Enum.KeyCode.One then
-			self:SetSelectedSlot(1)
-		elseif input.KeyCode == Enum.KeyCode.Two then
-			self:SetSelectedSlot(2)
-		elseif input.KeyCode == Enum.KeyCode.ButtonL1 or input.KeyCode == Enum.KeyCode.ButtonR1 then
-			-- Cycle slots with bumpers in ghost mode
-			self:SetSelectedSlot(if self._selectedSlot == 1 then 2 else 1)
 		end
 	end)
 end

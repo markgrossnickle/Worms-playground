@@ -66,7 +66,7 @@ local function randomArenaPosition(): Vector3
 	local dist = math.sqrt(math.random()) * maxRadius
 	local x = math.cos(angle) * dist
 	local z = math.sin(angle) * dist
-	return Vector3.new(x, TerrainHeight.getHeight(x, z) + 1, z)
+	return Vector3.new(x, TerrainHeight.getSurfaceY(x, z) + 2, z)
 end
 
 --------------------------------------------------

@@ -18,8 +18,7 @@ local HALF_ARENA = WormConfig.ArenaSize / 2
 local MIN_RECORD_DISTANCE = 0.5
 local ENTRIES_PER_SEGMENT = math.ceil(WormConfig.SegmentSpacing / MIN_RECORD_DISTANCE)
 
-local BOT_SEGMENT_LERP_SPEED = 5
-local BOT_SEGMENT_LERP_EPSILON = 0.1
+local BOT_SEGMENT_LERP_DURATION = 0.4
 local BOT_SEGMENT_LERP_DELAY = 0.08
 
 local TARGET_TOTAL_WORMS = 24
@@ -74,7 +73,7 @@ type BotData = {
 	LastRecordedPos: Vector3,
 	NextDirectionChange: number,
 	BoostEndTime: number,
-	LerpingSegments: { [number]: number }?, -- indices currently lerping; value is os.clock() start time after delay
+	LerpingSegments: { [number]: { StartTime: number, StartPos: Vector3 } }?, -- indices currently lerping after mid-body hit
 }
 
 local BotService = Knit.CreateService({
@@ -101,7 +100,7 @@ local function randomArenaPosition(): Vector3
 	local dist = math.sqrt(math.random()) * maxRadius
 	local x = math.cos(angle) * dist
 	local z = math.sin(angle) * dist
-	return Vector3.new(x, TerrainHeight.getHeight(x, z) + 1, z)
+	return Vector3.new(x, TerrainHeight.getSmoothSurfaceY(x, z) + WormConfig.SegmentSize / 2, z)
 end
 
 local function randomColor(): Color3
@@ -233,7 +232,7 @@ function BotService:_initPositionHistory(botData: BotData, spawnPos: Vector3)
 		local pos = spawnPos - botData.Direction * behindDist
 		botData.HistoryEnd += 1
 		botData.PositionHistory[botData.HistoryEnd] =
-			Vector3.new(pos.X, TerrainHeight.getHeight(pos.X, pos.Z) + 1, pos.Z)
+			Vector3.new(pos.X, TerrainHeight.getSmoothSurfaceY(pos.X, pos.Z) + WormConfig.SegmentSize / 2, pos.Z)
 	end
 
 	botData.LastRecordedPos = spawnPos
@@ -485,15 +484,32 @@ function BotService:DamageBot(
 	end
 
 	if isMidBodyHit then
-		local lerping = botData.LerpingSegments
-		if not lerping then
-			lerping = {}
-			botData.LerpingSegments = lerping
+		local oldLerping = botData.LerpingSegments
+		local newLerping: { [number]: { StartTime: number, StartPos: Vector3 } } = {}
+
+		-- Shift existing lerp entries down (indices decreased due to renumbering)
+		if oldLerping then
+			for oldIdx, entry in oldLerping do
+				if oldIdx > removeEnd then
+					local shifted = oldIdx - actualRemoved
+					if shifted >= 1 then
+						newLerping[shifted] = entry
+					end
+				end
+			end
 		end
+
+		-- Add new lerp entries for segments that just shifted to fill this gap
 		local lerpStartTime = os.clock() + BOT_SEGMENT_LERP_DELAY
 		for newIdx = removeStart, prevFloor - actualRemoved do
-			(lerping :: { [number]: number })[newIdx] = lerpStartTime
+			if not newLerping[newIdx] then
+				local seg = segFolder and segFolder:FindFirstChild("Segment" .. newIdx) :: BasePart?
+				local startPos = if seg then seg.Position else Vector3.zero
+				newLerping[newIdx] = { StartTime = lerpStartTime, StartPos = startPos }
+			end
 		end
+
+		botData.LerpingSegments = newLerping
 	end
 
 	if newFloor < prevFloor then
@@ -803,7 +819,7 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 
 	local move = dir * speed * dt
 	local newPos = hrp.Position + move
-	newPos = Vector3.new(newPos.X, TerrainHeight.getHeight(newPos.X, newPos.Z) + 1, newPos.Z)
+	newPos = Vector3.new(newPos.X, TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2, newPos.Z)
 
 	local newCFrame = CFrame.new(newPos, newPos + dir)
 	hrp.CFrame = newCFrame
@@ -816,7 +832,7 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 	self:_recordPosition(botData, newPos)
 end
 
-function BotService:_updateBotSegments(botData: BotData, dt: number)
+function BotService:_updateBotSegments(botData: BotData)
 	local model = botData.Model
 	local segFolder = model:FindFirstChild("WormSegments") :: Folder?
 	if not segFolder then
@@ -834,21 +850,22 @@ function BotService:_updateBotSegments(botData: BotData, dt: number)
 		local histIndex = botData.HistoryEnd - i * ENTRIES_PER_SEGMENT
 		if histIndex >= botData.HistoryStart and botData.PositionHistory[histIndex] then
 			local target = botData.PositionHistory[histIndex]
-			local lerpStart = lerping and lerping[i] or nil
-			if lerpStart and os.clock() >= lerpStart then
-				-- Post-delay: slide toward the target position to fill the gap
-				local alpha = math.min(1, dt * BOT_SEGMENT_LERP_SPEED)
-				local newPos = seg.Position:Lerp(target, alpha)
-				seg.Position = newPos
-				if (newPos - target).Magnitude < BOT_SEGMENT_LERP_EPSILON then
-					lerping[i] = nil
+			local lerpEntry = lerping and lerping[i] or nil
+			if lerpEntry then
+				local now = os.clock()
+				if now >= lerpEntry.StartTime then
+					local elapsed = now - lerpEntry.StartTime
+					local t = math.min(1, elapsed / BOT_SEGMENT_LERP_DURATION)
+					seg.Position = lerpEntry.StartPos:Lerp(target, t)
+					if t >= 1 then
+						lerping[i] = nil
+					end
 				end
-			elseif not lerpStart then
+				-- Pre-delay: leave segment in place (gap briefly visible)
+			else
 				-- Not lerping: snap to target position from history
 				seg.Position = target
 			end
-			-- Pre-delay (lerpStart set but os.clock() < lerpStart): leave segment in
-			-- place so the destroyed segment's gap is briefly visible.
 		end
 	end
 
@@ -1128,7 +1145,7 @@ function BotService:KnitStart()
 
 			self:_updateAI(botData, now)
 			self:_updateBotMovement(botData, dt)
-			self:_updateBotSegments(botData, dt)
+			self:_updateBotSegments(botData)
 			self:_checkBotFoodCollection(botData)
 			self:_checkBotCollisions(botData)
 		end

@@ -101,12 +101,8 @@ function WeaponController:TryShoot()
 	if not self._wormController._inGhostMode then
 		return
 	end
-	-- Don't shoot while grapple is pulling toward a worm
+	-- Don't shoot while grapple is pulling
 	if self._wormController._grappleState == "PULLING" then
-		return
-	end
-	-- Only shoot when weapon slot is selected
-	if self._wormController:GetSelectedSlot() ~= 2 then
 		return
 	end
 
@@ -546,9 +542,6 @@ function WeaponController:_setupInput()
 		if not self._weaponType then
 			return
 		end
-		if self._wormController:GetSelectedSlot() ~= 2 then
-			return
-		end
 
 		if
 			input.UserInputType == Enum.UserInputType.MouseButton1
@@ -577,10 +570,6 @@ function WeaponController:_setupInput()
 		end
 		if input.KeyCode == Enum.KeyCode.R or input.KeyCode == Enum.KeyCode.ButtonX then
 			if self._wormController._inGhostMode and self._weaponType then
-				-- Ensure weapon slot is selected so reload+shoot flow makes sense
-				if self._wormController:GetSelectedSlot() ~= 2 then
-					self._wormController:SetSelectedSlot(2)
-				end
 				self:TryReload()
 			end
 		end
@@ -602,12 +591,7 @@ function WeaponController:_setupInput()
 
 	-- Auto-fire for held button + pickup visual updates
 	self._trove:Connect(RunService.RenderStepped, function()
-		if
-			self._holding
-			and self._wormController._inGhostMode
-			and self._weaponType
-			and self._wormController:GetSelectedSlot() == 2
-		then
+		if self._holding and self._wormController._inGhostMode and self._weaponType then
 			self:TryShoot()
 		end
 		self:_updatePickupVisuals()
@@ -626,8 +610,6 @@ function WeaponController:_connectSignals()
 		self._lastShotTime = 0
 		self._reloading = false
 		self.WeaponAssigned:Fire(weaponType, ammo)
-		-- Auto-select weapon slot when a weapon is assigned
-		self._wormController:SetSelectedSlot(2)
 	end))
 
 	self._trove:Add(self._weaponService.AmmoChanged:Connect(function(ammo: number)

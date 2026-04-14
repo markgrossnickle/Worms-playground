@@ -37,7 +37,8 @@ local WormUIController = Knit.CreateController({
 	_deathLabel = nil :: TextLabel?,
 	_killFeedFrame = nil :: Frame?,
 	_minimapFrame = nil :: Frame?,
-	_minimapArrow = nil :: TextLabel?,
+	_minimapArrow = nil :: Frame?,
+	_minimapDebugLabel = nil :: TextLabel?,
 	_boostButton = nil :: ImageButton?,
 	_powerUpFrame = nil :: Frame?,
 	_powerUpLabel = nil :: TextLabel?,
@@ -378,27 +379,67 @@ function WormUIController:_buildMinimap(parent: ScreenGui)
 	self._shrinkCircle = shrinkCircle
 
 	-- Persistent player arrow (updated every frame for smooth rotation).
-	-- Use a TextLabel with the new SDF Font system — unlike the legacy bitmap
-	-- font path, SDF glyphs rotate smoothly without per-angle re-rasterisation,
-	-- so the arrow no longer flickers.
-	local arrow = Instance.new("TextLabel")
+	-- Uses a pure Frame-based needle — no text or image rendering at all.
+	-- Text/image elements flicker when rotated per-frame because Roblox
+	-- re-rasterises the glyph at each angle. A coloured Frame has zero
+	-- rasterisation cost and rotates flicker-free.
+	local arrow = Instance.new("Frame")
 	arrow.Name = "PlayerArrow"
-	arrow.Size = UDim2.new(0, 22, 0, 22)
+	arrow.Size = UDim2.new(0, 14, 0, 14)
 	arrow.Position = UDim2.fromScale(0.5, 0.5)
 	arrow.AnchorPoint = Vector2.new(0.5, 0.5)
 	arrow.BackgroundTransparency = 1
 	arrow.BorderSizePixel = 0
-	arrow.Text = "▲"
-	arrow.TextColor3 = Color3.fromRGB(100, 255, 100)
-	arrow.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-	arrow.TextStrokeTransparency = 0.2
-	arrow.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
-	arrow.TextScaled = true
 	arrow.Rotation = 0
 	arrow.ZIndex = 10
 	arrow.Parent = frame
 
+	-- Elongated green needle pointing "up" (local Y-) within the arrow frame
+	local needle = Instance.new("Frame")
+	needle.Name = "Needle"
+	needle.Size = UDim2.new(0, 4, 0, 12)
+	needle.Position = UDim2.fromScale(0.5, 0.5)
+	needle.AnchorPoint = Vector2.new(0.5, 0.5)
+	needle.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+	needle.BorderSizePixel = 0
+	needle.ZIndex = 11
+	needle.Parent = arrow
+
+	local needleCorner = Instance.new("UICorner")
+	needleCorner.CornerRadius = UDim.new(0.5, 0)
+	needleCorner.Parent = needle
+
+	-- Small bright tip at the top of the needle to show direction
+	local tip = Instance.new("Frame")
+	tip.Name = "Tip"
+	tip.Size = UDim2.new(0, 6, 0, 6)
+	tip.Position = UDim2.new(0.5, 0, 0, -1)
+	tip.AnchorPoint = Vector2.new(0.5, 0.5)
+	tip.BackgroundColor3 = Color3.fromRGB(180, 255, 180)
+	tip.BorderSizePixel = 0
+	tip.ZIndex = 12
+	tip.Parent = arrow
+
+	local tipCorner = Instance.new("UICorner")
+	tipCorner.CornerRadius = UDim.new(1, 0)
+	tipCorner.Parent = tip
+
 	self._minimapArrow = arrow
+
+	-- Debug coordinate label (temporary — remove after verifying minimap orientation)
+	local debugLabel = Instance.new("TextLabel")
+	debugLabel.Name = "MinimapDebug"
+	debugLabel.Size = UDim2.new(1, 0, 0, 10)
+	debugLabel.Position = UDim2.new(0, 0, 1, 2)
+	debugLabel.BackgroundTransparency = 1
+	debugLabel.Text = ""
+	debugLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+	debugLabel.Font = Enum.Font.Code
+	debugLabel.TextSize = 8
+	debugLabel.TextXAlignment = Enum.TextXAlignment.Center
+	debugLabel.ZIndex = 15
+	debugLabel.Parent = frame
+	self._minimapDebugLabel = debugLabel
 
 	-- Shift minimap up on touch devices to make room for boost button
 	if UserInputService.TouchEnabled then
@@ -778,7 +819,7 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	padding.Parent = toolbar
 
 	-- Slot 1: Grapple
-	local grappleHintText = PlatformUtil.ActionLabel("LMB to hook", "Tap to hook", "RT to hook")
+	local grappleHintText = PlatformUtil.ActionLabel("RMB to hook", "Tap to hook", "LT to hook")
 	local grappleSlot = self:_buildToolbarSlot(toolbar, "1", "GRAPPLE", grappleHintText, Color3.fromRGB(0, 180, 255))
 	self._grappleSlot = grappleSlot.Frame
 	self._grappleHint = grappleSlot.Hint
@@ -803,17 +844,6 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	self._weaponSlotAmmo = weaponSlot.Ammo
 	self._weaponSlotStroke = weaponSlot.Stroke
 
-	-- Click handlers for cross-platform slot switching (TextButton.Activated works on desktop + mobile)
-	grappleSlot.Frame.Activated:Connect(function()
-		if self._wormController then
-			self._wormController:SetSelectedSlot(1)
-		end
-	end)
-	weaponSlot.Frame.Activated:Connect(function()
-		if self._wormController then
-			self._wormController:SetSelectedSlot(2)
-		end
-	end)
 end
 
 function WormUIController:_buildRiderNotification(parent: ScreenGui)
@@ -1180,25 +1210,108 @@ function WormUIController:_updateMinimapArrow()
 	if not arrow.Visible then
 		arrow.Visible = true
 	end
+	local WormController = Knit.GetController("WormController")
+	local isAlive = WormController and WormController._alive
+
+	-- Two minimap modes:
+	-- Worm mode (alive): camera-relative — reads live camera axes so minimap
+	--   matches the top-down view exactly (proven working).
+	-- Ghost mode (first-person): fixed axes — the live camera spins with the
+	--   player which would make the minimap unusable, so we use fixed world axes.
 	local halfArena = WormConfig.ArenaSize / 2
 	local pos = hrp.Position
-	local nx = (pos.X + halfArena) / WormConfig.ArenaSize
-	local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
-	arrow.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
+	local minimapX: number
+	local minimapY: number
 
-	local dir = hrp.CFrame.LookVector
-	if dir.Magnitude < 0.01 then
-		local WormController = Knit.GetController("WormController")
-		if WormController and WormController._direction then
-			dir = WormController._direction
+	if isAlive then
+		-- Camera-relative: project world position onto camera's screen axes
+		local cam = workspace.CurrentCamera
+		local camRight = cam.CFrame.RightVector
+		local camUp = cam.CFrame.UpVector
+		local screenRightXZ = Vector3.new(camRight.X, 0, camRight.Z)
+		local screenUpXZ = Vector3.new(camUp.X, 0, camUp.Z)
+		if screenRightXZ.Magnitude > 0.01 then
+			screenRightXZ = screenRightXZ.Unit
 		end
+		if screenUpXZ.Magnitude > 0.01 then
+			screenUpXZ = screenUpXZ.Unit
+		end
+		local worldXZ = Vector3.new(pos.X, 0, pos.Z)
+		local rightDot = worldXZ:Dot(screenRightXZ)
+		local upDot = worldXZ:Dot(screenUpXZ)
+		minimapX = (rightDot + halfArena) / WormConfig.ArenaSize
+		minimapY = 1 - (upDot + halfArena) / WormConfig.ArenaSize
+	else
+		-- Ghost mode: fixed axes (world +X = right, world -Z = up)
+		minimapX = (pos.X + halfArena) / WormConfig.ArenaSize
+		minimapY = (-pos.Z + halfArena) / WormConfig.ArenaSize
 	end
 
-	-- The minimap is world-aligned: top of minimap = world -Z, bottom = world +Z,
-	-- left = world -X, right = world +X. The arrow glyph "▲" points up at rotation 0.
-	-- atan2(dir.X, -dir.Z) gives the heading angle measured CW from the screen-up axis,
-	-- which is exactly what GuiObject.Rotation expects (CW positive in degrees).
-	arrow.Rotation = math.deg(math.atan2(dir.X, -dir.Z))
+	arrow.Position = UDim2.fromScale(math.clamp(minimapX, 0, 1), math.clamp(minimapY, 0, 1))
+
+	-- Direction for arrow rotation
+	local dir: Vector3
+	if isAlive and WormController._direction then
+		dir = WormController._direction
+	else
+		dir = hrp.CFrame.LookVector
+	end
+	if dir.Magnitude < 0.01 then
+		return
+	end
+
+	if isAlive then
+		-- Camera-relative rotation
+		local cam = workspace.CurrentCamera
+		local camRight = cam.CFrame.RightVector
+		local camUp = cam.CFrame.UpVector
+		local screenRightXZ = Vector3.new(camRight.X, 0, camRight.Z)
+		local screenUpXZ = Vector3.new(camUp.X, 0, camUp.Z)
+		if screenRightXZ.Magnitude > 0.01 then
+			screenRightXZ = screenRightXZ.Unit
+		end
+		if screenUpXZ.Magnitude > 0.01 then
+			screenUpXZ = screenUpXZ.Unit
+		end
+		local dirRight = dir:Dot(screenRightXZ)
+		local dirUp = dir:Dot(screenUpXZ)
+		arrow.Rotation = math.deg(math.atan2(dirRight, dirUp))
+	else
+		-- Ghost mode: fixed axes rotation
+		arrow.Rotation = math.deg(math.atan2(dir.X, -dir.Z))
+	end
+end
+
+-- Minimap helper: converts a world position to minimap [0,1] scale.
+-- Uses camera-relative axes when alive, fixed axes in ghost mode.
+function WormUIController:_worldToMinimapScale(worldPos: Vector3): (number, number)
+	local halfArena = WormConfig.ArenaSize / 2
+	local WormController = Knit.GetController("WormController")
+	local isAlive = WormController and WormController._alive
+
+	if isAlive then
+		local cam = workspace.CurrentCamera
+		local camRight = cam.CFrame.RightVector
+		local camUp = cam.CFrame.UpVector
+		local screenRightXZ = Vector3.new(camRight.X, 0, camRight.Z)
+		local screenUpXZ = Vector3.new(camUp.X, 0, camUp.Z)
+		if screenRightXZ.Magnitude > 0.01 then
+			screenRightXZ = screenRightXZ.Unit
+		end
+		if screenUpXZ.Magnitude > 0.01 then
+			screenUpXZ = screenUpXZ.Unit
+		end
+		local worldXZ = Vector3.new(worldPos.X, 0, worldPos.Z)
+		local rightDot = worldXZ:Dot(screenRightXZ)
+		local upDot = worldXZ:Dot(screenUpXZ)
+		local mx = (rightDot + halfArena) / WormConfig.ArenaSize
+		local my = 1 - (upDot + halfArena) / WormConfig.ArenaSize
+		return math.clamp(mx, 0, 1), math.clamp(my, 0, 1)
+	else
+		local mx = (worldPos.X + halfArena) / WormConfig.ArenaSize
+		local my = (-worldPos.Z + halfArena) / WormConfig.ArenaSize
+		return math.clamp(mx, 0, 1), math.clamp(my, 0, 1)
+	end
 end
 
 function WormUIController:_updateMinimap()
@@ -1213,8 +1326,6 @@ function WormUIController:_updateMinimap()
 			child:Destroy()
 		end
 	end
-
-	local halfArena = WormConfig.ArenaSize / 2
 
 	-- Player dots (other players only; local player arrow is updated per-frame)
 	for _, player in Players:GetPlayers() do
@@ -1232,14 +1343,12 @@ function WormUIController:_updateMinimap()
 			continue
 		end
 
-		local pos = hrp.Position
-		local nx = (pos.X + halfArena) / WormConfig.ArenaSize
-		local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
+		local mx, my = self:_worldToMinimapScale(hrp.Position)
 
 		local dot = Instance.new("Frame")
 		dot.Name = "Dot"
 		dot.Size = UDim2.new(0, 6, 0, 6)
-		dot.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
+		dot.Position = UDim2.fromScale(mx, my)
 		dot.AnchorPoint = Vector2.new(0.5, 0.5)
 		dot.BorderSizePixel = 0
 		dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
@@ -1257,14 +1366,13 @@ function WormUIController:_updateMinimap()
 			if not hrp then
 				continue
 			end
-			local pos = hrp.Position
-			local nx = (pos.X + halfArena) / WormConfig.ArenaSize
-			local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
+
+			local mx, my = self:_worldToMinimapScale(hrp.Position)
 
 			local dot = Instance.new("Frame")
 			dot.Name = "Dot"
 			dot.Size = UDim2.new(0, 6, 0, 6)
-			dot.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
+			dot.Position = UDim2.fromScale(mx, my)
 			dot.AnchorPoint = Vector2.new(0.5, 0.5)
 			dot.BorderSizePixel = 0
 			dot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
@@ -1281,14 +1389,12 @@ function WormUIController:_updateMinimap()
 	if powerUpsFolder then
 		for _, powerUp in powerUpsFolder:GetChildren() do
 			if powerUp:IsA("BasePart") then
-				local pos = powerUp.Position
-				local nx = (pos.X + halfArena) / WormConfig.ArenaSize
-				local nz = (pos.Z + halfArena) / WormConfig.ArenaSize
+				local mx, my = self:_worldToMinimapScale(powerUp.Position)
 
 				local dot = Instance.new("Frame")
 				dot.Name = "Dot"
 				dot.Size = UDim2.new(0, 5, 0, 5)
-				dot.Position = UDim2.fromScale(math.clamp(nx, 0, 1), math.clamp(nz, 0, 1))
+				dot.Position = UDim2.fromScale(mx, my)
 				dot.AnchorPoint = Vector2.new(0.5, 0.5)
 				dot.BorderSizePixel = 0
 				dot.BackgroundColor3 = Color3.fromRGB(255, 255, 0)
@@ -1303,6 +1409,7 @@ function WormUIController:_updateMinimap()
 
 	-- Update shrink zone circle
 	if self._shrinkCircle then
+		local halfArena = WormConfig.ArenaSize / 2
 		local radiusFraction = self._currentZoneRadius / halfArena
 		self._shrinkCircle.Size = UDim2.fromScale(math.clamp(radiusFraction, 0, 1), math.clamp(radiusFraction, 0, 1))
 	end
@@ -1574,21 +1681,13 @@ function WormUIController:KnitStart()
 		self._maxAmmo = 0
 	end))
 
-	-- Wire slot selection highlight
-	self._trove:Add(self._wormController.SelectedSlotChanged:Connect(function(slot: number)
-		if self._grappleSlotStroke then
-			self._grappleSlotStroke.Transparency = if slot == 1 then 0 else 1
-		end
-		if self._weaponSlotStroke then
-			self._weaponSlotStroke.Transparency = if slot == 2 then 0 else 1
-		end
-		-- Update hint text
-		if self._grappleHint then
-			local hookText = PlatformUtil.ActionLabel("LMB to hook", "Tap to hook", "RT to hook")
-			local switchText = PlatformUtil.ActionLabel("Press [1]", "Tap to select", "LB to switch")
-			self._grappleHint.Text = if slot == 1 then hookText else switchText
-		end
-	end))
+	-- Both slots always highlighted (left-click = shoot, right-click = grapple)
+	if self._grappleSlotStroke then
+		self._grappleSlotStroke.Transparency = 0
+	end
+	if self._weaponSlotStroke then
+		self._weaponSlotStroke.Transparency = 0
+	end
 
 	-- Wire rider notification (shown to alive worm player when a ghost mounts/dismounts)
 	self._trove:Add(self._wormService.RiderAttached:Connect(function(_riderName: string)

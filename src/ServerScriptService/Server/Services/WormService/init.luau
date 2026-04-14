@@ -26,7 +26,7 @@ type WormData = {
 	HistoryEnd: number,
 	LastRecordedPos: Vector3,
 	SpawnTime: number,
-	LerpingSegments: { [number]: number }?, -- segment indices currently lerping after a mid-body hit; value is os.clock() start time (after delay)
+	LerpingSegments: { [number]: { StartTime: number, StartPos: Vector3 } }?, -- segment indices currently lerping after a mid-body hit
 	GrappleTarget: Vector3?,
 	GrappleStartTime: number,
 	GrappleStartPos: Vector3?,
@@ -92,11 +92,6 @@ local WormService = Knit.CreateService({
 -- Private helpers
 --------------------------------------------------
 
--- Terrain surface sits at getHeight + 1 (FillBlock top).
--- Worms need their centre above the surface; food sits ON the surface.
-local WORM_Y_OFFSET = 3 -- worm centre above getHeight (≈ surface + SegmentSize/2)
-local FOOD_Y_OFFSET = 2 -- food centre just above terrain surface
-
 function WormService:_randomArenaPosition(): Vector3
 	-- Spawn within a circle (not square) so players don't land outside the zone
 	local margin = 50
@@ -105,7 +100,7 @@ function WormService:_randomArenaPosition(): Vector3
 	local dist = math.sqrt(math.random()) * maxRadius -- sqrt for uniform distribution
 	local x = math.cos(angle) * dist
 	local z = math.sin(angle) * dist
-	return Vector3.new(x, TerrainHeight.getHeight(x, z) + WORM_Y_OFFSET, z)
+	return Vector3.new(x, TerrainHeight.getSmoothSurfaceY(x, z) + WormConfig.SegmentSize / 2, z)
 end
 
 function WormService:_randomColor(): Color3
@@ -348,7 +343,7 @@ function WormService:_spawnFood()
 	food.Shape = Enum.PartType.Ball
 	food.Size = Vector3.new(tier.Size, tier.Size, tier.Size)
 	local pos = self:_randomArenaPosition()
-	food.Position = Vector3.new(pos.X, TerrainHeight.getHeight(pos.X, pos.Z) + FOOD_Y_OFFSET, pos.Z)
+	food.Position = Vector3.new(pos.X, TerrainHeight.getSurfaceY(pos.X, pos.Z) + tier.Size / 2, pos.Z)
 	food.Anchored = true
 	food.CanCollide = false
 	food.Material = Enum.Material.Neon
@@ -397,7 +392,7 @@ function WormService:_dropFoodAtPositions(positions: { Vector3 }, count: number)
 		else
 			return
 		end
-		pos = Vector3.new(pos.X, TerrainHeight.getHeight(pos.X, pos.Z) + FOOD_Y_OFFSET, pos.Z)
+		pos = Vector3.new(pos.X, TerrainHeight.getSurfaceY(pos.X, pos.Z) + 0.75, pos.Z)
 
 		local food = Instance.new("Part")
 		food.Name = "Food"
@@ -578,7 +573,7 @@ function WormService:_initPositionHistory(wormData: WormData, spawnPos: Vector3)
 		local pos = spawnPos - wormData.Direction * behindDist
 		wormData.HistoryEnd += 1
 		wormData.PositionHistory[wormData.HistoryEnd] =
-			Vector3.new(pos.X, TerrainHeight.getHeight(pos.X, pos.Z) + 3, pos.Z)
+			Vector3.new(pos.X, TerrainHeight.getSmoothSurfaceY(pos.X, pos.Z) + WormConfig.SegmentSize / 2, pos.Z)
 	end
 
 	wormData.LastRecordedPos = spawnPos
@@ -848,18 +843,35 @@ function WormService:DamageWorm(
 	end
 
 	-- For mid-body hits, lerp the shifted segments smoothly to fill the gap.
-	-- We store the time the lerp should START so the destroyed segment is visible
-	-- briefly before the rest slide in to fill the gap.
+	-- We rebuild the lerp table, shifting any existing entries down by actualRemoved
+	-- so that indices stay consistent after segment renumbering.
 	if isMidBodyHit then
-		local lerping = wormData.LerpingSegments
-		if not lerping then
-			lerping = {}
-			wormData.LerpingSegments = lerping
+		local oldLerping = wormData.LerpingSegments
+		local newLerping: { [number]: { StartTime: number, StartPos: Vector3 } } = {}
+
+		-- Shift existing lerp entries down (their segment indices decreased due to renumbering)
+		if oldLerping then
+			for oldIdx, entry in oldLerping do
+				if oldIdx > removeEnd then
+					local shifted = oldIdx - actualRemoved
+					if shifted >= 1 then
+						newLerping[shifted] = entry
+					end
+				end
+			end
 		end
+
+		-- Add new lerp entries for segments that just shifted to fill this gap
 		local lerpStartTime = os.clock() + SEGMENT_LERP_DELAY
 		for newIdx = removeStart, currentFloor - actualRemoved do
-			(lerping :: { [number]: number })[newIdx] = lerpStartTime
+			if not newLerping[newIdx] then -- don't override an in-progress lerp
+				local seg = segFolder and segFolder:FindFirstChild("Segment" .. newIdx) :: BasePart?
+				local startPos = if seg then seg.Position else Vector3.zero
+				newLerping[newIdx] = { StartTime = lerpStartTime, StartPos = startPos }
+			end
 		end
+
+		wormData.LerpingSegments = newLerping
 	end
 
 	if newFloor < currentFloor then
@@ -873,7 +885,11 @@ function WormService:DamageWorm(
 		local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 		if hrp then
 			local newPos = hrp.Position + knockbackImpulse.Unit * (knockbackImpulse.Magnitude * 0.1)
-			newPos = Vector3.new(newPos.X, TerrainHeight.getHeight(newPos.X, newPos.Z) + 3, newPos.Z)
+			newPos = Vector3.new(
+				newPos.X,
+				TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2,
+				newPos.Z
+			)
 			hrp.CFrame = CFrame.new(newPos, newPos + wormData.CurrentDirection)
 
 			local wormHead = character:FindFirstChild("WormHead") :: BasePart?
@@ -1200,10 +1216,9 @@ function WormService:_checkBotGhostEating(botName: string, headPos: Vector3)
 	end
 end
 
-local SEGMENT_LERP_SPEED = 5 -- per-second alpha scalar for gap-fill lerp (slower = more visible slide)
-local SEGMENT_LERP_EPSILON = 0.1 -- distance below which lerping is considered finished
+local SEGMENT_LERP_DURATION = 0.4 -- seconds for gap-fill slide (linear interpolation)
 
-function WormService:_updateSegments(player: Player, dt: number)
+function WormService:_updateSegments(player: Player)
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
 		return
@@ -1231,21 +1246,24 @@ function WormService:_updateSegments(player: Player, dt: number)
 		local histIndex = wormData.HistoryEnd - i * ENTRIES_PER_SEGMENT
 		if histIndex >= wormData.HistoryStart and wormData.PositionHistory[histIndex] then
 			local target = wormData.PositionHistory[histIndex]
-			local lerpStart = lerping and lerping[i] or nil
-			if lerpStart and os.clock() >= lerpStart then
-				-- Post-delay: slide toward the target position to fill the gap
-				local alpha = math.min(1, dt * SEGMENT_LERP_SPEED)
-				local newPos = seg.Position:Lerp(target, alpha)
-				seg.Position = newPos
-				if (newPos - target).Magnitude < SEGMENT_LERP_EPSILON then
-					lerping[i] = nil
+			local lerpEntry = lerping and lerping[i] or nil
+			if lerpEntry then
+				local now = os.clock()
+				if now >= lerpEntry.StartTime then
+					-- Linear interpolation from start position to target over fixed duration
+					local elapsed = now - lerpEntry.StartTime
+					local t = math.min(1, elapsed / SEGMENT_LERP_DURATION)
+					seg.Position = lerpEntry.StartPos:Lerp(target, t)
+					if t >= 1 then
+						lerping[i] = nil
+					end
 				end
-			elseif not lerpStart then
+				-- Pre-delay (StartTime not reached): leave segment in place
+				-- so the destroyed segment's gap is briefly visible.
+			else
 				-- Not lerping: snap to target position from history
 				seg.Position = target
 			end
-			-- Pre-delay (lerpStart set but os.clock() < lerpStart): leave segment in
-			-- place so the destroyed segment's gap is briefly visible.
 		end
 	end
 
@@ -1351,7 +1369,11 @@ function WormService:_updateMovement(player: Player, dt: number)
 			local startPos = wormData.GrappleStartPos :: Vector3
 			local targetPos = wormData.GrappleTarget :: Vector3
 			local newPos = startPos:Lerp(targetPos, alpha)
-			newPos = Vector3.new(newPos.X, TerrainHeight.getHeight(newPos.X, newPos.Z) + 3, newPos.Z)
+			newPos = Vector3.new(
+				newPos.X,
+				TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2,
+				newPos.Z
+			)
 
 			local pullDir = (targetPos - startPos) * Vector3.new(1, 0, 1)
 			if pullDir.Magnitude > 0.1 then
@@ -1375,7 +1397,7 @@ function WormService:_updateMovement(player: Player, dt: number)
 	-- Move HRP in direction (anchored, so CFrame set is authoritative)
 	local move = dir * speed * dt
 	local newPos = hrp.Position + move
-	newPos = Vector3.new(newPos.X, TerrainHeight.getHeight(newPos.X, newPos.Z) + 3, newPos.Z)
+	newPos = Vector3.new(newPos.X, TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2, newPos.Z)
 
 	local newCFrame = CFrame.new(newPos, newPos + dir)
 	hrp.CFrame = newCFrame
@@ -1415,7 +1437,7 @@ function WormService:_gameStep(dt: number)
 		end
 
 		self:_updateMovement(player, dt)
-		self:_updateSegments(player, dt)
+		self:_updateSegments(player)
 
 		local headPos = hrp.Position
 		self:_checkFoodCollection(player, headPos)
@@ -1633,7 +1655,7 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 
 	local ghostConfig = WormConfig.Ghost
 	local gx, gz = math.random(-50, 50), math.random(-50, 50)
-	local spawnPos = Vector3.new(gx, TerrainHeight.getHeight(gx, gz) + 2, gz)
+	local spawnPos = Vector3.new(gx, TerrainHeight.getSurfaceY(gx, gz) + 2, gz)
 
 	-- Determine ghost color (team color if team mode, default ghostly blue otherwise)
 	local ghostColor = Color3.fromRGB(180, 200, 255)
@@ -1928,7 +1950,8 @@ function WormService.Client:GrappleGround(player: Player, targetX: number, targe
 	end
 
 	-- Validate range
-	local targetPos = Vector3.new(targetX, TerrainHeight.getHeight(targetX, targetZ) + 3, targetZ)
+	local targetPos =
+		Vector3.new(targetX, TerrainHeight.getSmoothSurfaceY(targetX, targetZ) + WormConfig.SegmentSize / 2, targetZ)
 	local dist = (targetPos - hrp.Position).Magnitude
 	if dist > WormConfig.Grapple.Range then
 		return
