@@ -33,6 +33,40 @@ local BOOST_DURATION_MIN = 0.5
 local BOOST_DURATION_MAX = 2
 local SPAWN_CHECK_INTERVAL = 2
 
+-- Random UserIds for bot avatar heads (diverse catalog of real Roblox avatars)
+local BOT_AVATAR_IDS = {
+	1,
+	2,
+	3,
+	4,
+	5,
+	6,
+	7,
+	8,
+	9,
+	10,
+	156,
+	261,
+	4042,
+	13656,
+	36498,
+	50210,
+	71608,
+	80254,
+	95382,
+	123456,
+	261035,
+	370580,
+	491633,
+	567811,
+	698704,
+	812341,
+	929020,
+	1087263,
+	1234567,
+	2345678,
+}
+
 local BOT_NAMES = {
 	"Slinky",
 	"Noodle",
@@ -132,28 +166,82 @@ function BotService:_createBotModel(name: string, color: Color3, spawnPos: Vecto
 	hrp.Parent = model
 	model.PrimaryPart = hrp
 
-	-- Bot head: classic Roblox head mesh with face decal and name label
+	-- Bot head: load a random Roblox avatar head from catalog
 	local headSize = WormConfig.SegmentSize + 0.5
-	local wormHead = Instance.new("Part")
-	wormHead.Name = "WormHead"
-	wormHead.Size = Vector3.new(headSize, headSize, headSize)
-	wormHead.Color = color
-	wormHead.Material = Enum.Material.SmoothPlastic
-	wormHead.Transparency = 0
-	wormHead.Anchored = true
-	wormHead.CanCollide = false
-	wormHead.CFrame = CFrame.new(spawnPos)
+	local wormHead: BasePart = nil
 
-	local headMesh = Instance.new("SpecialMesh")
-	headMesh.MeshType = Enum.MeshType.Head
-	headMesh.Scale = Vector3.new(1.25, 1.25, 1.25)
-	headMesh.Parent = wormHead
+	-- Try to load a random avatar head
+	local avatarUserId = BOT_AVATAR_IDS[math.random(1, #BOT_AVATAR_IDS)]
+	local avatarLoaded = false
 
-	local face = Instance.new("Decal")
-	face.Name = "face"
-	face.Texture = "rbxasset://textures/face.png"
-	face.Face = Enum.NormalId.Front
-	face.Parent = wormHead
+	local success, avatarModel = pcall(function()
+		return Players:CreateHumanoidModelFromUserId(avatarUserId)
+	end)
+
+	if success and avatarModel then
+		local avatarHead = avatarModel:FindFirstChild("Head")
+		if avatarHead and avatarHead:IsA("BasePart") then
+			wormHead = avatarHead:Clone()
+			wormHead.Name = "WormHead"
+			wormHead.Size = Vector3.new(headSize, headSize, headSize)
+			wormHead.Anchored = true
+			wormHead.CanCollide = false
+			wormHead.CanQuery = false
+			wormHead.CFrame = CFrame.new(spawnPos)
+
+			-- Remove any Motor6D joints from the cloned head
+			for _, child in wormHead:GetDescendants() do
+				if child:IsA("Motor6D") or child:IsA("Weld") then
+					child:Destroy()
+				end
+			end
+
+			-- Keep face decals and mesh, clone accessories attached to head
+			for _, child in avatarModel:GetDescendants() do
+				if child:IsA("Accessory") then
+					local handle = child:FindFirstChild("Handle")
+					if handle then
+						local att = handle:FindFirstChildOfClass("Attachment")
+						if
+							att and att.Name:find("Hat")
+							or att and att.Name:find("Hair")
+							or att and att.Name:find("Face")
+						then
+							local accClone = child:Clone()
+							accClone.Parent = wormHead
+						end
+					end
+				end
+			end
+
+			avatarLoaded = true
+		end
+		avatarModel:Destroy()
+	end
+
+	-- Fallback: classic Roblox head mesh if avatar loading fails
+	if not avatarLoaded then
+		wormHead = Instance.new("Part")
+		wormHead.Name = "WormHead"
+		wormHead.Size = Vector3.new(headSize, headSize, headSize)
+		wormHead.Color = color
+		wormHead.Material = Enum.Material.SmoothPlastic
+		wormHead.Transparency = 0
+		wormHead.Anchored = true
+		wormHead.CanCollide = false
+		wormHead.CFrame = CFrame.new(spawnPos)
+
+		local headMesh = Instance.new("SpecialMesh")
+		headMesh.MeshType = Enum.MeshType.Head
+		headMesh.Scale = Vector3.new(1.25, 1.25, 1.25)
+		headMesh.Parent = wormHead
+
+		local face = Instance.new("Decal")
+		face.Name = "face"
+		face.Texture = "rbxasset://textures/face.png"
+		face.Face = Enum.NormalId.Front
+		face.Parent = wormHead
+	end
 
 	wormHead.Parent = model
 
