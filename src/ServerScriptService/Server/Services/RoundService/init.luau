@@ -12,6 +12,9 @@ local ShrinkZoneService -- Set in KnitStart
 local PowerUpService -- Set in KnitStart
 local CoinService -- Set in KnitStart
 local TeamService -- Set in KnitStart
+local CrownService -- Set in KnitStart
+local MarksService -- Set in KnitStart
+local SandTideService -- Set in KnitStart
 
 local PLACEMENT_REWARDS = { [1] = 100, [2] = 60, [3] = 40, [4] = 25 }
 local DEFAULT_REWARD = 10
@@ -31,13 +34,37 @@ local RoundService = Knit.CreateService({
 		RoundCountdown = Knit.CreateSignal(),
 		RoundStarted = Knit.CreateSignal(),
 		ForceSpectate = Knit.CreateSignal(),
+		-- Worm King: fired once/second during active rounds — (elapsed, remaining, phase)
+		-- phase ∈ { "Active", "Lockdown" }
+		MatchTick = Knit.CreateSignal(),
 	},
 
 	_roundActive = false,
+	_roundStartTime = 0 :: number, -- os.clock() at _startRound; used for respawn lockout
+	_matchPhase = "Active" :: string, -- "Active" | "Lockdown"
 	_eliminationOrder = {} :: { EliminationEntry },
 	_pollConnection = nil :: RBXScriptConnection?,
 	_winningTeamIndex = nil :: number?,
 })
+
+--------------------------------------------------
+-- Public queries (used by MarksService, HUD, etc.)
+--------------------------------------------------
+
+function RoundService:IsRoundActive(): boolean
+	return self._roundActive
+end
+
+function RoundService:GetRoundElapsed(): number
+	if not self._roundActive or self._roundStartTime <= 0 then
+		return 0
+	end
+	return os.clock() - self._roundStartTime
+end
+
+function RoundService:GetMatchPhase(): string
+	return self._matchPhase
+end
 
 --------------------------------------------------
 -- Round lifecycle
@@ -46,12 +73,20 @@ local RoundService = Knit.CreateService({
 function RoundService:_startRound()
 	self._eliminationOrder = {}
 	self._roundActive = true
+	self._roundStartTime = os.clock()
+	self._matchPhase = "Active"
 	self._winningTeamIndex = nil
 
 	-- Reset game state
 	ShrinkZoneService:Reset()
 	PowerUpService:Reset()
 	WormService:ResetFood()
+	-- Worm King: spawn Crown at centroid + zero team scores
+	CrownService:ResetAndSpawn()
+	-- Worm King: reset Marks currency for all players
+	MarksService:ResetAll()
+	-- Worm King: reset sand tide to scale 1.0 (bases at full extent)
+	SandTideService:Reset()
 
 	-- Tell services the round is active
 	WormService:SetRoundActive(true)
@@ -83,6 +118,11 @@ function RoundService:_startRound()
 
 	-- Start polling win condition
 	self:_startPollWinCondition()
+
+	-- Worm King: start the per-second match timer (drives countdown + lockdown + timeout win-con)
+	if TeamService:IsEnabled() then
+		self:_startMatchTimer()
+	end
 end
 
 function RoundService:_getAllAliveNames(): { string }
@@ -110,11 +150,16 @@ function RoundService:_startPollWinCondition()
 			local totalAlive = WormService:GetAliveCount() + BotService:GetAliveCount()
 
 			if TeamService:IsEnabled() then
-				local aliveTeams = TeamService:GetAliveTeams(self:_getAllAliveNames())
-				if #aliveTeams <= 1 then
-					self._winningTeamIndex = if #aliveTeams == 1 then aliveTeams[1] else nil
-					self:_endRound()
-					return
+				-- Worm King: elimination win only applies during Lockdown (respawns disabled).
+				-- Before lockdown, dead players can re-buy into the round with Marks, so an
+				-- "empty team" is temporary — don't end the round early.
+				if self._matchPhase == "Lockdown" then
+					local aliveTeams = TeamService:GetAliveTeams(self:_getAllAliveNames())
+					if #aliveTeams <= 1 then
+						self._winningTeamIndex = if #aliveTeams == 1 then aliveTeams[1] else nil
+						self:_endRound()
+						return
+					end
 				end
 			else
 				if totalAlive <= 1 then
@@ -128,10 +173,74 @@ function RoundService:_startPollWinCondition()
 	end) :: any
 end
 
+--------------------------------------------------
+-- Match timer (Worm King)
+--------------------------------------------------
+
+-- Pick the winning team at timeout: highest score wins; ties broken by fewest
+-- segments lost (we don't track that today), fall back to lowest team index.
+function RoundService:_computeTimeoutWinner(): number?
+	if not CrownService then
+		return nil
+	end
+	local scores = CrownService:GetScoreSnapshot()
+	local bestIdx: number? = nil
+	local bestScore = -1
+	for _, entry in scores do
+		if entry.Score > bestScore then
+			bestScore = entry.Score
+			bestIdx = entry.TeamIndex
+		elseif entry.Score == bestScore and bestIdx and entry.TeamIndex < bestIdx then
+			bestIdx = entry.TeamIndex
+		end
+	end
+	-- No score at all: no winner (dead-draw)
+	if bestScore <= 0 then
+		return nil
+	end
+	return bestIdx
+end
+
+function RoundService:_startMatchTimer()
+	local matchDur = WormConfig.WormKing.MatchDuration
+	local lockoutStart = WormConfig.WormKing.RespawnLockoutStart
+
+	-- Initial broadcast at T+0 so the HUD populates immediately
+	self.Client.MatchTick:FireAll(0, matchDur, "Active")
+
+	task.spawn(function()
+		while self._roundActive do
+			task.wait(1)
+			if not self._roundActive then
+				return
+			end
+
+			local elapsed = self:GetRoundElapsed()
+			local remaining = math.max(0, matchDur - elapsed)
+
+			-- Phase transition into Lockdown (T+RespawnLockoutStart)
+			if self._matchPhase == "Active" and elapsed >= lockoutStart then
+				self._matchPhase = "Lockdown"
+			end
+
+			self.Client.MatchTick:FireAll(elapsed, remaining, self._matchPhase)
+
+			-- Timeout win-con (T+MatchDuration) — pick best-score team and end
+			if elapsed >= matchDur then
+				self._winningTeamIndex = self:_computeTimeoutWinner()
+				self:_endRound()
+				return
+			end
+		end
+	end)
+end
+
 function RoundService:_endRound()
 	self._roundActive = false
 	WormService:SetRoundActive(false)
 	BotService:SetRoundActive(false)
+	-- Worm King: hide Crown until next round
+	CrownService:Despawn()
 
 	-- Collect survivor stats (the last one(s) standing)
 	local alivePlayers = WormService:GetAlivePlayers()
@@ -258,6 +367,18 @@ function RoundService:KnitStart()
 	PowerUpService = require(script.Parent.PowerUpService)
 	CoinService = require(script.Parent.CoinService)
 	TeamService = require(script.Parent.TeamService)
+	CrownService = require(script.Parent.CrownService)
+	MarksService = require(script.Parent.MarksService)
+	SandTideService = require(script.Parent.SandTideService)
+
+	-- Worm King win-con 1: score threshold reached → end round with winning team.
+	CrownService.TeamWonSignal:Connect(function(teamIndex: number)
+		if not self._roundActive then
+			return
+		end
+		self._winningTeamIndex = teamIndex
+		self:_endRound()
+	end)
 
 	-- Track ALL player deaths (walls, zone, and player-kills-player)
 	-- PlayerDied fires server-side for every player death

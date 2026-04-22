@@ -1078,11 +1078,14 @@ function WeaponService:_updateMine(projData: ProjectileData, dt: number)
 		end
 	end
 
-	-- Once armed and stopped, scan for nearby enemy worms
+	-- Once armed and stopped, scan for nearby enemy worms using spatial query.
+	-- Build include-filter of non-teammate worm + bot models (small N),
+	-- then let Roblox's spatial hash find any nearby parts in a single call.
 	if projData.Armed and projData.Stopped then
 		local center = projData.Position
 		local shooter = projData.Player
 
+		local candidates: { Instance } = {}
 		for player, wormData in WormService._worms do
 			if wormData.State ~= "Alive" then
 				continue
@@ -1091,32 +1094,24 @@ function WeaponService:_updateMine(projData: ProjectileData, dt: number)
 				continue
 			end
 			local char = player.Character
-			if not char then
-				continue
-			end
-			local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
-			if hrp and (hrp.Position - center).Magnitude <= triggerRadius then
-				self:_explodeProjectile(projData)
-				return
-			end
-			-- Also check segments to handle long worms
-			local segFolder = char:FindFirstChild("WormSegments")
-			if segFolder then
-				for _, seg in segFolder:GetChildren() do
-					if seg:IsA("BasePart") and (seg.Position - center).Magnitude <= triggerRadius then
-						self:_explodeProjectile(projData)
-						return
-					end
-				end
+			if char then
+				table.insert(candidates, char)
 			end
 		end
-
 		for botName, botInfo in WormService._botModels do
 			if TeamService:AreTeammates(shooter.Name, botName) then
 				continue
 			end
-			local botHrp = botInfo.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
-			if botHrp and (botHrp.Position - center).Magnitude <= triggerRadius then
+			table.insert(candidates, botInfo.Model)
+		end
+
+		if #candidates > 0 then
+			local params = OverlapParams.new()
+			params.FilterType = Enum.RaycastFilterType.Include
+			params.FilterDescendantsInstances = candidates
+			params.MaxParts = 1 -- one is enough to trigger
+			local hits = Workspace:GetPartBoundsInRadius(center, triggerRadius, params)
+			if #hits > 0 then
 				self:_explodeProjectile(projData)
 				return
 			end

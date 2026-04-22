@@ -44,6 +44,9 @@ local WormController = Knit.CreateController({
 	_teamService = nil :: any,
 	_direction = Vector3.new(0, 0, -1),
 	_boosting = false,
+	-- Throttle direction updates to server (20Hz) to save bandwidth
+	_lastSentDirection = Vector3.new(0, 0, -1),
+	_lastDirectionSendTime = 0,
 	_segments = WormConfig.InitialSegments,
 	_alive = false,
 	_touchPosition = nil :: Vector2?,
@@ -83,10 +86,6 @@ local WormController = Knit.CreateController({
 	_grappleGroundTarget = nil :: Vector3?, -- ground-pull target position
 	_grappleGroundPart = nil :: BasePart?, -- temp part for beam attachment
 
-	-- Tool slot selection (ghost mode)
-	_selectedSlot = 1 :: number, -- 1 = Grapple, 2 = Weapon
-	SelectedSlotChanged = Signal.new(), -- (slotNumber)
-
 	-- Power-up hiding in ghost mode
 	_powerUpHideConn = nil :: RBXScriptConnection?,
 
@@ -100,6 +99,8 @@ local WormController = Knit.CreateController({
 	_groundGrappleAtt0 = nil :: Attachment?,
 	_groundGrappleAtt1 = nil :: Attachment?,
 	_groundGrappleAnchor = nil :: Part?,
+	_groundGrappleImpact = nil :: ParticleEmitter?,
+	_groundGrappleTrove = nil :: any,
 	_groundGrappleCooldownEnd = 0,
 })
 
@@ -385,10 +386,7 @@ function WormController:_setupInput()
 		end
 
 		if not processed then
-			if
-				input.UserInputType == Enum.UserInputType.MouseButton1
-				or input.KeyCode == Enum.KeyCode.LeftShift
-			then
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.LeftShift then
 				self:SetBoosting(true)
 			end
 		end
@@ -491,11 +489,18 @@ end
 
 function WormController:_onRenderStep(dt: number)
 	if self._alive then
-		-- Send direction to server
+		-- Compute direction locally every frame (for camera/animation responsiveness)
 		local dir = self:_getWorldDirection()
 		if dir and self._wormService then
 			self._direction = dir
-			self._wormService:SetDirection(dir.X, dir.Z)
+			-- Throttle server sends: only when direction changed > ~3 degrees OR 50ms elapsed (20Hz cap)
+			local now = os.clock()
+			local dirChangedEnough = dir:Dot(self._lastSentDirection) < 0.9986 -- ~3° threshold
+			if dirChangedEnough or (now - self._lastDirectionSendTime) >= 0.05 then
+				self._wormService:SetDirection(dir.X, dir.Z)
+				self._lastSentDirection = dir
+				self._lastDirectionSendTime = now
+			end
 		end
 
 		self:_updateCamera()
@@ -676,6 +681,7 @@ function WormController:_connectServerSignals()
 
 	self._trove:Add(self._roundService.ForceSpectate:Connect(function()
 		self._alive = false
+		self:_cleanupGroundGrapple()
 		self:_setupCamera()
 		self:_autoSpectate()
 	end))
@@ -881,10 +887,6 @@ function WormController:_enterGhostMode()
 	self._spectateTarget = nil
 	self._spectateTargetModel = nil
 
-	-- Reset tool selection to grapple
-	self._selectedSlot = 1
-	self.SelectedSlotChanged:Fire(1)
-
 	-- Hide power-ups from ghost players
 	self:_hideAllPowerUps()
 
@@ -998,41 +1000,103 @@ function WormController:_fireGroundGrapple()
 		return
 	end
 
-	-- Create anchor part at target
+	-- Trove-based lifetime tracking for all grapple visuals
+	local grappleTrove = Trove.new()
+	self._groundGrappleTrove = grappleTrove
+
+	local GRAPPLE_COLOR = Color3.fromRGB(0, 200, 255)
+
+	-- Create anchor part at target (parented to workspace so it does NOT follow the worm)
 	local anchor = Instance.new("Part")
 	anchor.Name = "GrappleAnchor"
 	anchor.Size = Vector3.new(0.5, 0.5, 0.5)
 	anchor.Position = target
 	anchor.Anchored = true
 	anchor.CanCollide = false
+	anchor.CastShadow = false
 	anchor.Transparency = 0.5
 	anchor.Material = Enum.Material.Neon
-	anchor.Color = Color3.fromRGB(0, 200, 255)
+	anchor.Color = GRAPPLE_COLOR
 	anchor.Parent = workspace
 	self._groundGrappleAnchor = anchor
+	grappleTrove:Add(anchor)
 
 	local att0 = Instance.new("Attachment")
+	att0.Name = "GroundGrappleAtt0"
 	att0.Parent = hrp
 	self._groundGrappleAtt0 = att0
+	grappleTrove:Add(att0)
 
 	local att1 = Instance.new("Attachment")
+	att1.Name = "GroundGrappleAtt1"
 	att1.Parent = anchor
 	self._groundGrappleAtt1 = att1
+	grappleTrove:Add(att1)
 
+	-- Main rope/beam. Parent to workspace.Terrain so it renders regardless of
+	-- character streaming state and is guaranteed replicated/visible.
 	local beam = Instance.new("Beam")
+	beam.Name = "GroundGrappleBeam"
 	beam.Attachment0 = att0
 	beam.Attachment1 = att1
-	beam.Color = ColorSequence.new(Color3.fromRGB(0, 200, 255))
-	beam.Width0 = 0.4
-	beam.Width1 = 0.2
+	beam.Color = ColorSequence.new(GRAPPLE_COLOR)
+	beam.Width0 = 0.6
+	beam.Width1 = 0.6
+	beam.Segments = 10
 	beam.FaceCamera = true
-	beam.LightEmission = 0.8
-	beam.Transparency = NumberSequence.new(0.1)
-	beam.Parent = hrp
+	beam.LightEmission = 1
+	beam.LightInfluence = 0
+	beam.Transparency = NumberSequence.new(0)
+	beam.CurveSize0 = 0
+	beam.CurveSize1 = 0
+	beam.Parent = workspace.Terrain
 	self._groundGrappleBeam = beam
+	grappleTrove:Add(beam)
 
-	-- Clean up after pull duration
-	task.delay(WormConfig.Grapple.PullDuration + 0.1, function()
+	-- Impact spark at the anchor point
+	local impact = Instance.new("ParticleEmitter")
+	impact.Name = "GroundGrappleImpact"
+	impact.Color = ColorSequence.new(GRAPPLE_COLOR)
+	impact.LightEmission = 1
+	impact.LightInfluence = 0
+	impact.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.6),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	impact.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	impact.Lifetime = NumberRange.new(0.2, 0.35)
+	impact.Speed = NumberRange.new(6, 12)
+	impact.SpreadAngle = Vector2.new(180, 180)
+	impact.Rotation = NumberRange.new(0, 360)
+	impact.Rate = 0
+	impact.Drag = 2
+	impact.Parent = anchor
+	impact:Emit(20)
+	self._groundGrappleImpact = impact
+	grappleTrove:Add(impact)
+
+	-- Pulse the beam width slightly for a more "alive" rope feel
+	local pullDuration = WormConfig.Grapple.PullDuration
+	local startClock = os.clock()
+	grappleTrove:Add(RunService.RenderStepped:Connect(function()
+		local elapsed = os.clock() - startClock
+		local t = elapsed / pullDuration
+		if t >= 1 then
+			-- Fade out near the end
+			local fadeT = math.clamp((elapsed - pullDuration) / 0.1, 0, 1)
+			beam.Transparency = NumberSequence.new(fadeT)
+			return
+		end
+		local pulse = 0.6 + math.sin(elapsed * 40) * 0.12
+		beam.Width0 = pulse
+		beam.Width1 = pulse
+	end))
+
+	-- Clean up after pull duration (+ short fade tail)
+	task.delay(pullDuration + 0.12, function()
 		self:_cleanupGroundGrapple()
 	end)
 end
@@ -1041,9 +1105,21 @@ function WormController:_cleanupGroundGrapple()
 	self._groundGrappleActive = false
 	self._groundGrappleTarget = nil
 
+	-- Trove-based teardown: destroys beam, anchor, attachments, particles,
+	-- and disconnects the pulse RenderStepped connection in one shot.
+	if self._groundGrappleTrove then
+		self._groundGrappleTrove:Destroy()
+		self._groundGrappleTrove = nil
+	end
+
+	-- Defensive fallback cleanup in case anything slipped past the trove
 	if self._groundGrappleBeam then
 		self._groundGrappleBeam:Destroy()
 		self._groundGrappleBeam = nil
+	end
+	if self._groundGrappleImpact then
+		self._groundGrappleImpact:Destroy()
+		self._groundGrappleImpact = nil
 	end
 	if self._groundGrappleAtt0 then
 		self._groundGrappleAtt0:Destroy()
@@ -1509,8 +1585,24 @@ function WormController:IsAlive(): boolean
 	return self._alive
 end
 
+function WormController:IsInGhostMode(): boolean
+	return self._inGhostMode
+end
+
 function WormController:IsFreeCamActive(): boolean
 	return self._freeCamActive
+end
+
+-- Public wrapper so touch/mobile UI (e.g. on-screen Grapple button in
+-- WormUIController) can trigger the grapple without duplicating the "ghost vs
+-- alive" dispatch that the keyboard/mouse handlers do. Desktop keeps using
+-- RMB / E / X for alive worms and RMB / L2 for ghost worms.
+function WormController:FireGrapple()
+	if self._inGhostMode then
+		self:_onGhostGrapple()
+	elseif self._alive then
+		self:_fireGroundGrapple()
+	end
 end
 
 function WormController:GetAliveCount(): number
@@ -1540,21 +1632,6 @@ function WormController:SetBoosting(boosting: boolean)
 	if self._wormService then
 		self._wormService:SetBoosting(boosting)
 	end
-end
-
-function WormController:SetSelectedSlot(slot: number)
-	if slot ~= 1 and slot ~= 2 then
-		return
-	end
-	if slot == self._selectedSlot then
-		return
-	end
-	self._selectedSlot = slot
-	self.SelectedSlotChanged:Fire(slot)
-end
-
-function WormController:GetSelectedSlot(): number
-	return self._selectedSlot
 end
 
 --------------------------------------------------

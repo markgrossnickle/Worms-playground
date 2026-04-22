@@ -7,6 +7,8 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 
+local TeamService -- resolved in KnitStart
+
 local HALF_ARENA = WormConfig.ArenaSize / 2
 local RING_SEGMENTS = 64
 local RING_HEIGHT = 15
@@ -26,7 +28,15 @@ local ShrinkZoneService = Knit.CreateService({
 	_warnedStart = false,
 	_warned30s = false,
 	_lastClientUpdate = 0,
+	_disabled = false, -- set true in Worm King (team) mode — triangle replaces the circle
 })
+
+-- Worm King mode uses the SandTide triangle as the shrinking boundary; the
+-- circular ring would just fight with it and let worms spawn outside the
+-- visible wall. All state / visuals are gated off when `_disabled` is true.
+local function isTeamMode(): boolean
+	return TeamService ~= nil and TeamService:IsEnabled()
+end
 
 --------------------------------------------------
 -- Ring visual
@@ -79,6 +89,9 @@ end
 --------------------------------------------------
 
 function ShrinkZoneService:GetCurrentRadius(): number
+	if self._disabled then
+		return HALF_ARENA
+	end
 	return self._currentRadius
 end
 
@@ -87,11 +100,17 @@ function ShrinkZoneService:GetElapsedTime(): number
 end
 
 function ShrinkZoneService:IsOutsideZone(position: Vector3): boolean
+	if self._disabled then
+		return false
+	end
 	local dist = Vector3.new(position.X, 0, position.Z).Magnitude
 	return dist > self._currentRadius
 end
 
 function ShrinkZoneService:_update()
+	if self._disabled then
+		return
+	end
 	local elapsed = self:GetElapsedTime()
 	local now = os.clock()
 
@@ -137,7 +156,23 @@ function ShrinkZoneService:Reset()
 	self._warnedStart = false
 	self._warned30s = false
 	self._lastClientUpdate = 0
+	if self._disabled then
+		-- Ensure the ring is hidden in case this mode was toggled at runtime.
+		for _, part in self._ringParts do
+			part.Transparency = 1
+		end
+		return
+	end
 	self:_updateRingVisual()
+end
+
+-- Hide the circular ring entirely (ring parts become invisible, damage gates
+-- off). Called once in KnitStart when TeamService:IsEnabled().
+function ShrinkZoneService:_disable()
+	self._disabled = true
+	for _, part in self._ringParts do
+		part.Transparency = 1
+	end
 end
 
 --------------------------------------------------
@@ -149,7 +184,14 @@ function ShrinkZoneService:KnitInit()
 end
 
 function ShrinkZoneService:KnitStart()
+	TeamService = require(script.Parent.TeamService)
+
 	self._gameStartTime = os.clock()
+
+	if isTeamMode() then
+		self:_disable()
+		return
+	end
 
 	RunService.Heartbeat:Connect(function()
 		self:_update()

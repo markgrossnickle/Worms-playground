@@ -8,11 +8,13 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local Signal = require(ReplicatedStorage.Packages.Signal)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
+local TeamBase = require(ReplicatedStorage.Shared.TeamBase)
 
 local WormService -- Set in KnitStart via require
 local PowerUpService -- Set in KnitStart via require
 local ShrinkZoneService -- Set in KnitStart via require
 local TeamService -- Set in KnitStart via require
+local SandTideService -- Set in KnitStart via require
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
 local MIN_RECORD_DISTANCE = 0.5
@@ -108,6 +110,11 @@ type BotData = {
 	NextDirectionChange: number,
 	BoostEndTime: number,
 	LerpingSegments: { [number]: { StartTime: number, StartPos: Vector3 } }?, -- indices currently lerping after mid-body hit
+	-- Bandwidth optimization: server-side source-of-truth positions.
+	-- Updated every Heartbeat, but only flushed to Parts at 10Hz to reduce replication.
+	HeadPosition: Vector3,
+	HeadDirection: Vector3,
+	SegmentPositions: { [number]: Vector3 },
 }
 
 local BotService = Knit.CreateService({
@@ -118,6 +125,7 @@ local BotService = Knit.CreateService({
 	_usedNames = {} :: { [string]: boolean },
 	_roundActive = false,
 	_roundBotStats = {} :: { [string]: { Kills: number, MaxSegments: number } },
+	_broadcastTick = 0,
 
 	BotKilled = Signal.new(),
 })
@@ -291,16 +299,22 @@ function BotService:_createSegment(botData: BotData, index: number)
 	seg:SetAttribute("MaxHP", WormConfig.SegmentHP)
 	seg:SetAttribute("HP", WormConfig.SegmentHP)
 
+	-- Prefer server-side HeadPosition (updated every Heartbeat) over hrp.Position
+	-- which only reflects the most recent 10Hz flush.
+	local headPos = if botData.HeadPosition ~= Vector3.zero then botData.HeadPosition else hrp.Position
 	if botData.HistoryEnd >= botData.HistoryStart then
 		local histIndex = botData.HistoryEnd - index * ENTRIES_PER_SEGMENT
 		if histIndex >= botData.HistoryStart and botData.PositionHistory[histIndex] then
 			seg.Position = botData.PositionHistory[histIndex]
 		else
-			seg.Position = hrp.Position - botData.Direction * (index * WormConfig.SegmentSpacing)
+			seg.Position = headPos - botData.Direction * (index * WormConfig.SegmentSpacing)
 		end
 	else
-		seg.Position = hrp.Position - Vector3.new(0, 0, index * WormConfig.SegmentSpacing)
+		seg.Position = headPos - Vector3.new(0, 0, index * WormConfig.SegmentSpacing)
 	end
+
+	-- Seed the SegmentPositions data table so the source of truth matches the Part.
+	botData.SegmentPositions[index] = seg.Position
 
 	seg.Parent = segFolder
 end
@@ -363,8 +377,28 @@ end
 function BotService:_spawnBot()
 	local name = self:_pickBotName()
 	local color = randomColor()
-	local spawnPos = randomArenaPosition()
-	local direction = randomDirection()
+
+	-- Worm King: assign team FIRST so spawn pos + facing can use it.
+	local teamIndex: number? = nil
+	if TeamService:IsEnabled() then
+		teamIndex = TeamService:AssignToTeam(name)
+	end
+
+	-- Spawn at the team base if teamed; face toward centroid. Fall back to random otherwise.
+	local spawnPos: Vector3
+	local direction: Vector3
+	if teamIndex and teamIndex > 0 then
+		-- Bases ride the sand tide scale — use current scale for spawn positioning.
+		local scale = if SandTideService then SandTideService:GetScale() else 1.0
+		spawnPos = TeamBase.getScaledSpawnPosition(teamIndex, scale, nil)
+		-- Facing direction is invariant under uniform scale about origin (centroid).
+		local baseXZ = TeamBase.getBasePositionXZ(teamIndex)
+		local toCenter = Vector3.new(-baseXZ.X, 0, -baseXZ.Z)
+		direction = if toCenter.Magnitude > 0.001 then toCenter.Unit else randomDirection()
+	else
+		spawnPos = randomArenaPosition()
+		direction = randomDirection()
+	end
 
 	local model = self:_createBotModel(name, color, spawnPos)
 
@@ -385,20 +419,27 @@ function BotService:_spawnBot()
 		LastRecordedPos = Vector3.zero,
 		NextDirectionChange = os.clock() + math.random() * DIRECTION_CHANGE_MAX + DIRECTION_CHANGE_MIN,
 		BoostEndTime = 0,
+		HeadPosition = Vector3.zero,
+		HeadDirection = Vector3.new(0, 0, -1),
+		SegmentPositions = {},
 	}
 
 	self:_initPositionHistory(botData, spawnPos)
 
+	-- Seed the bandwidth-optimization head data with the actual spawn pose.
+	botData.HeadPosition = spawnPos
+	botData.HeadDirection = direction
+
 	for i = 1, WormConfig.InitialSegments do
 		self:_createSegment(botData, i)
 	end
+	-- _createSegment seeds botData.SegmentPositions[i] internally.
 
 	self._bots[name] = botData
 	WormService:RegisterBot(name, model, botData.Segments)
 
-	-- Assign to team and apply team color
-	if TeamService:IsEnabled() then
-		local teamIndex = TeamService:AssignToTeam(name)
+	-- Apply team color (team assignment already happened above, before spawn pos calc)
+	if teamIndex and teamIndex > 0 then
 		local teamColor = TeamService:GetTeamColor(teamIndex)
 		if teamColor then
 			botData.Color = teamColor
@@ -571,6 +612,29 @@ function BotService:DamageBot(
 		end
 	end
 
+	-- Rebuild SegmentPositions to match the renumbered Parts so the data table
+	-- stays consistent with the visual indices.
+	do
+		local oldPositions = botData.SegmentPositions
+		local newPositions: { [number]: Vector3 } = {}
+		for oldIdx, pos in oldPositions do
+			if oldIdx >= removeStart and oldIdx <= removeEnd then
+				-- Destroyed — drop entry.
+				continue
+			elseif oldIdx > removeEnd then
+				local shifted = oldIdx - actualRemoved
+				if shifted >= 1 and shifted <= newFloor then
+					newPositions[shifted] = pos
+				end
+			else
+				if oldIdx <= newFloor then
+					newPositions[oldIdx] = pos
+				end
+			end
+		end
+		botData.SegmentPositions = newPositions
+	end
+
 	if isMidBodyHit then
 		local oldLerping = botData.LerpingSegments
 		local newLerping: { [number]: { StartTime: number, StartPos: Vector3 } } = {}
@@ -587,12 +651,19 @@ function BotService:DamageBot(
 			end
 		end
 
-		-- Add new lerp entries for segments that just shifted to fill this gap
+		-- Add new lerp entries for segments that just shifted to fill this gap.
+		-- Prefer the SegmentPositions data table (source of truth) over Part.Position
+		-- since Parts only reflect the most recent 10Hz flush.
 		local lerpStartTime = os.clock() + BOT_SEGMENT_LERP_DELAY
 		for newIdx = removeStart, prevFloor - actualRemoved do
 			if not newLerping[newIdx] then
-				local seg = segFolder and segFolder:FindFirstChild("Segment" .. newIdx) :: BasePart?
-				local startPos = if seg then seg.Position else Vector3.zero
+				local startPos: Vector3 = botData.SegmentPositions[newIdx] or Vector3.zero
+				if startPos == Vector3.zero then
+					local seg = segFolder and segFolder:FindFirstChild("Segment" .. newIdx) :: BasePart?
+					if seg then
+						startPos = seg.Position
+					end
+				end
 				newLerping[newIdx] = { StartTime = lerpStartTime, StartPos = startPos }
 			end
 		end
@@ -632,7 +703,9 @@ function BotService:ExplodeBot(
 	local extraDamage = 0
 	for i = 1, segCount do
 		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
-		if seg and (seg.Position - center).Magnitude <= radius then
+		-- Use server-side source of truth (Part position only flushed at 10Hz).
+		local segPos = botData.SegmentPositions[i] or (seg and seg.Position)
+		if seg and segPos and (segPos - center).Magnitude <= radius then
 			if not primaryHit then
 				primaryHit = i
 			else
@@ -746,7 +819,9 @@ function BotService:_updateAI(botData: BotData, now: number)
 		return
 	end
 
-	local botPos = hrp.Position
+	-- Read from server-side source of truth (updated every Heartbeat) rather than
+	-- the Part, which only reflects the most recent 10Hz flush.
+	local botPos = botData.HeadPosition
 
 	-- Shrink zone avoidance (highest priority)
 	local zoneRadius = ShrinkZoneService:GetCurrentRadius()
@@ -906,15 +981,26 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 	botData.CurrentDirection = dir
 
 	local move = dir * speed * dt
-	local newPos = hrp.Position + move
-	newPos = Vector3.new(newPos.X, TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2, newPos.Z)
+	local newPos = botData.HeadPosition + move
+	newPos = Vector3.new(
+		newPos.X,
+		TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2,
+		newPos.Z
+	)
 
-	local newCFrame = CFrame.new(newPos, newPos + dir)
-	hrp.CFrame = newCFrame
+	-- Always update server-side source of truth (cheap data write).
+	botData.HeadPosition = newPos
+	botData.HeadDirection = dir
 
-	local wormHead = model:FindFirstChild("WormHead") :: BasePart?
-	if wormHead then
-		wormHead.CFrame = newCFrame
+	-- Only flush to actual Parts at 10Hz to throttle replication bandwidth.
+	if self._broadcastTick % 6 == 0 then
+		local newCFrame = CFrame.new(newPos, newPos + dir)
+		hrp.CFrame = newCFrame
+
+		local wormHead = model:FindFirstChild("WormHead") :: BasePart?
+		if wormHead then
+			wormHead.CFrame = newCFrame
+		end
 	end
 
 	self:_recordPosition(botData, newPos)
@@ -927,6 +1013,7 @@ function BotService:_updateBotSegments(botData: BotData)
 		return
 	end
 
+	local shouldFlush = self._broadcastTick % 6 == 0
 	local lerping = botData.LerpingSegments
 	local segCount = math.floor(botData.Segments)
 	for i = 1, segCount do
@@ -939,12 +1026,13 @@ function BotService:_updateBotSegments(botData: BotData)
 		if histIndex >= botData.HistoryStart and botData.PositionHistory[histIndex] then
 			local target = botData.PositionHistory[histIndex]
 			local lerpEntry = lerping and lerping[i] or nil
+			local desiredPos: Vector3? = nil
 			if lerpEntry then
 				local now = os.clock()
 				if now >= lerpEntry.StartTime then
 					local elapsed = now - lerpEntry.StartTime
 					local t = math.min(1, elapsed / BOT_SEGMENT_LERP_DURATION)
-					seg.Position = lerpEntry.StartPos:Lerp(target, t)
+					desiredPos = lerpEntry.StartPos:Lerp(target, t)
 					if t >= 1 then
 						lerping[i] = nil
 					end
@@ -952,8 +1040,24 @@ function BotService:_updateBotSegments(botData: BotData)
 				-- Pre-delay: leave segment in place (gap briefly visible)
 			else
 				-- Not lerping: snap to target position from history
-				seg.Position = target
+				desiredPos = target
 			end
+
+			if desiredPos then
+				-- Always update server-side source of truth (cheap data write).
+				botData.SegmentPositions[i] = desiredPos
+				-- Only flush to actual Parts at 10Hz to throttle replication.
+				if shouldFlush then
+					seg.Position = desiredPos
+				end
+			end
+		end
+	end
+
+	-- Clear stale entries for segments that no longer exist (e.g. after damage shrinks the worm).
+	for idx in botData.SegmentPositions do
+		if idx > segCount then
+			botData.SegmentPositions[idx] = nil
 		end
 	end
 
@@ -968,7 +1072,8 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 		return
 	end
 
-	local headPos = hrp.Position
+	-- Use server-side source of truth (HRP is only flushed at 10Hz).
+	local headPos = botData.HeadPosition
 
 	-- Check power-up collection first
 	PowerUpService:CollectPowerUp(botData.Name, headPos)
@@ -983,15 +1088,24 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 		return
 	end
 
+	-- Gate Part.Position writes to 10Hz (every 6th Heartbeat) to stay within the
+	-- "Server Brain, Client Body" replication budget. Mirrors the logic in
+	-- WormService:_checkFoodCollection — pullSpeed is 6× to preserve stud/s rate.
+	local magnetFlush = (self._broadcastTick % 6 == 0)
 	for _, food in foodFolder:GetChildren() do
 		if food:IsA("BasePart") then
 			local diff = food.Position - headPos
 			local dist = diff.Magnitude
 
 			-- Pull nearby food toward head
-			if effectiveRange > 0 and dist < effectiveRange and dist > WormConfig.CollisionRadius + 1 then
+			if
+				magnetFlush
+				and effectiveRange > 0
+				and dist < effectiveRange
+				and dist > WormConfig.CollisionRadius + 1
+			then
 				local pullDir = -diff.Unit
-				food.Position = food.Position + pullDir * pullSpeed
+				food.Position = food.Position + pullDir * (pullSpeed * 6)
 			end
 
 			if dist < WormConfig.CollisionRadius + 1 then
@@ -1019,7 +1133,8 @@ function BotService:_checkBotCollisions(botData: BotData)
 		return
 	end
 
-	local headPos = hrp.Position
+	-- Use server-side source of truth (HRP is only flushed at 10Hz).
+	local headPos = botData.HeadPosition
 
 	-- Ghost power-up: skip collisions
 	if PowerUpService:IsGhost(botData.Name) then
@@ -1055,7 +1170,9 @@ function BotService:_checkBotCollisions(botData: BotData)
 		end
 	end
 
-	-- Check against other bot segments
+	-- Check against other bot segments. Use the other bot's server-side
+	-- SegmentPositions table (source of truth) rather than reading Part.Position,
+	-- which only reflects the most recent 10Hz flush.
 	for otherName, otherData in self._bots do
 		if otherName == botData.Name or otherData.State ~= "Alive" then
 			continue
@@ -1064,18 +1181,12 @@ function BotService:_checkBotCollisions(botData: BotData)
 		if TeamService:AreTeammates(botData.Name, otherName) then
 			continue
 		end
-		local segFolder = otherData.Model:FindFirstChild("WormSegments") :: Folder?
-		if not segFolder then
-			continue
-		end
 
-		for _, seg in segFolder:GetChildren() do
-			if seg:IsA("BasePart") then
-				local segDist = (seg.Position - headPos).Magnitude
-				if segDist < WormConfig.CollisionRadius * 2 then
-					self:_killBot(botData.Name, otherName)
-					return
-				end
+		for _, segPos in otherData.SegmentPositions do
+			local segDist = (segPos - headPos).Magnitude
+			if segDist < WormConfig.CollisionRadius * 2 then
+				self:_killBot(botData.Name, otherName)
+				return
 			end
 		end
 	end
@@ -1133,6 +1244,15 @@ function BotService:GetAliveBotNames(): { string }
 		end
 	end
 	return names
+end
+
+-- Worm King helper: return a live bot's current head position, or nil if missing/dead.
+function BotService:GetBotHeadPosition(name: string): Vector3?
+	local botData = self._bots[name]
+	if not botData or botData.State ~= "Alive" then
+		return nil
+	end
+	return botData.HeadPosition
 end
 
 function BotService:KillAllBots()
@@ -1198,6 +1318,7 @@ function BotService:KnitStart()
 	PowerUpService = require(script.Parent.PowerUpService)
 	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
 	TeamService = require(script.Parent.TeamService)
+	SandTideService = require(script.Parent.SandTideService)
 
 	-- Spawn management loop — only fills when round is active
 	task.spawn(function()
@@ -1215,6 +1336,7 @@ function BotService:KnitStart()
 
 	-- Game loop for bot movement and AI
 	RunService.Heartbeat:Connect(function(dt: number)
+		self._broadcastTick += 1
 		local now = os.clock()
 
 		-- Collect bot names first to avoid modifying table during iteration

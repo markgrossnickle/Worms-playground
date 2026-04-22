@@ -10,6 +10,7 @@ local Trove = require(ReplicatedStorage.Packages.Trove)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 local Enums = require(ReplicatedStorage.Shared.Enums)
+local TeamBase = require(ReplicatedStorage.Shared.TeamBase)
 
 type WormState = Enums.WormState
 type WormData = {
@@ -31,6 +32,14 @@ type WormData = {
 	GrappleStartTime: number,
 	GrappleStartPos: Vector3?,
 	GrappleCooldownEnd: number,
+	-- Cached position state: updated every frame as the source of truth for gameplay.
+	-- Actual Part CFrames are only written at 10Hz (every 6th Heartbeat) to keep
+	-- replication bandwidth bounded — see _broadcastTick.
+	HeadPosition: Vector3,
+	HeadDirection: Vector3,
+	SegmentPositions: { [number]: Vector3 },
+	-- Worm King: spawn invulnerability window. Broken by damaging others or leaving base safe zone.
+	SpawnProtectionUntil: number,
 }
 
 local PowerUpService -- Set in KnitStart
@@ -38,6 +47,7 @@ local ShrinkZoneService -- Set in KnitStart
 local TeamService -- Set in KnitStart
 local WeaponService -- Set in KnitStart
 local LeaderboardService -- Set in KnitStart
+local SandTideService -- Set in KnitStart
 
 local GHOST_FOOD_VALUE = WormConfig.Ghost.EatValue
 local GHOST_RESPAWN_DELAY = WormConfig.Ghost.RespawnDelay
@@ -81,6 +91,7 @@ local WormService = Knit.CreateService({
 	_rideStartTimes = {} :: { [Player]: number }, -- os.clock() when ghost started riding
 	_totalRideTimes = {} :: { [Player]: number }, -- accumulated ride seconds
 	_batchSpawning = false, -- Suppress FoodSpawned signal during bulk food creation
+	_broadcastTick = 0, -- Heartbeat counter; Part CFrames are written when this % 6 == 0 (10Hz at 60fps)
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -101,6 +112,31 @@ function WormService:_randomArenaPosition(): Vector3
 	local x = math.cos(angle) * dist
 	local z = math.sin(angle) * dist
 	return Vector3.new(x, TerrainHeight.getSmoothSurfaceY(x, z) + WormConfig.SegmentSize / 2, z)
+end
+
+-- Worm King: pick a spawn point inside a team's base ring, or fall back to random if no team.
+-- Bases ride the sand tide scale, so fetch the current scale from SandTideService.
+function WormService:_spawnPositionForTeam(teamIndex: number?): Vector3
+	if not teamIndex or teamIndex <= 0 then
+		return self:_randomArenaPosition()
+	end
+	local scale = if SandTideService then SandTideService:GetScale() else 1.0
+	return TeamBase.getScaledSpawnPosition(teamIndex, scale, nil)
+end
+
+-- Worm King: initial facing when spawning at a team base — point toward centroid so worms
+-- naturally move out from their corner toward the Crown. Flat (Y=0), unit length.
+function WormService:_spawnFacingForTeam(teamIndex: number?): Vector3
+	if not teamIndex or teamIndex <= 0 then
+		return Vector3.new(0, 0, -1)
+	end
+	-- Scale doesn't matter for facing (direction is invariant under uniform scale about origin)
+	local basePos = TeamBase.getBasePositionXZ(teamIndex)
+	local toCenter = Vector3.new(-basePos.X, 0, -basePos.Z)
+	if toCenter.Magnitude < 0.001 then
+		return Vector3.new(0, 0, -1)
+	end
+	return toCenter.Unit
 end
 
 function WormService:_randomColor(): Color3
@@ -313,6 +349,134 @@ function WormService:_createArena()
 	colorCorrection.Brightness = 0.05
 	colorCorrection.Saturation = 0.1
 	colorCorrection.Parent = Lighting
+
+	-- Worm King: carve out 3 team bases at triangle corners
+	self:_createTeamBases()
+end
+
+-- Flatten the terrain under each base, then spawn a visible flag/banner + safe-zone dome.
+function WormService:_createTeamBases()
+	local basesFolder = workspace:FindFirstChild("TeamBases") :: Folder?
+	if basesFolder then
+		basesFolder:Destroy()
+	end
+	basesFolder = Instance.new("Folder")
+	basesFolder.Name = "TeamBases"
+	basesFolder.Parent = workspace
+
+	local flattenRadius = WormConfig.WormKing.BaseFlattenRadius
+	local safeRadius = WormConfig.WormKing.BaseSafeRadius
+
+	for teamIndex, teamConfig in WormConfig.TeamColors do
+		local baseXZ = TeamBase.getBasePositionXZ(teamIndex)
+		local cx, cz = baseXZ.X, baseXZ.Z
+
+		-- Flatten terrain: fill a cylinder-ish region with compacted blocks at a target height,
+		-- then sit the base platform on top. We sample the smooth surface at the center and
+		-- re-fill blocks within `flattenRadius` to that height.
+		local targetY = TerrainHeight.getHeight(cx, cz)
+		local step = 8
+		for x = cx - flattenRadius, cx + flattenRadius, step do
+			for z = cz - flattenRadius, cz + flattenRadius, step do
+				local dx = x - cx
+				local dz = z - cz
+				if dx * dx + dz * dz <= flattenRadius * flattenRadius then
+					workspace.Terrain:FillBlock(
+						CFrame.new(x, targetY / 2, z),
+						Vector3.new(step, targetY + 2, step),
+						Enum.Material.Sandstone
+					)
+				end
+			end
+		end
+
+		-- Flat platform on top for a clean spawn surface (slight y offset for visual pop)
+		local platform = Instance.new("Part")
+		platform.Name = "BasePlatform_" .. teamConfig.Name
+		platform.Shape = Enum.PartType.Cylinder
+		platform.Size = Vector3.new(1.5, flattenRadius * 2, flattenRadius * 2)
+		platform.CFrame = CFrame.new(cx, targetY + 1.2, cz) * CFrame.Angles(0, 0, math.rad(90))
+		platform.Anchored = true
+		platform.CanCollide = false
+		platform.CanQuery = false
+		platform.Material = Enum.Material.SmoothPlastic
+		platform.Color = teamConfig.Color:Lerp(Color3.fromRGB(80, 60, 40), 0.55)
+		platform.Transparency = 0.3
+		platform.Parent = basesFolder
+
+		-- Team-colored glowing ring at the safe-zone boundary (purely visual, dome-like)
+		local ring = Instance.new("Part")
+		ring.Name = "SafeZoneRing_" .. teamConfig.Name
+		ring.Shape = Enum.PartType.Cylinder
+		ring.Size = Vector3.new(0.5, safeRadius * 2, safeRadius * 2)
+		ring.CFrame = CFrame.new(cx, targetY + 0.6, cz) * CFrame.Angles(0, 0, math.rad(90))
+		ring.Anchored = true
+		ring.CanCollide = false
+		ring.CanQuery = false
+		ring.Material = Enum.Material.Neon
+		ring.Color = teamConfig.Color
+		ring.Transparency = 0.6
+		ring.Parent = basesFolder
+
+		-- Tall flag pole + banner at the exact center
+		local pole = Instance.new("Part")
+		pole.Name = "FlagPole_" .. teamConfig.Name
+		pole.Size = Vector3.new(1, 40, 1)
+		pole.CFrame = CFrame.new(cx, targetY + 20, cz)
+		pole.Anchored = true
+		pole.CanCollide = false
+		pole.CanQuery = false
+		pole.Material = Enum.Material.Metal
+		pole.Color = Color3.fromRGB(90, 90, 90)
+		pole.Parent = basesFolder
+
+		local banner = Instance.new("Part")
+		banner.Name = "Banner_" .. teamConfig.Name
+		banner.Size = Vector3.new(0.2, 12, 16)
+		banner.CFrame = CFrame.new(cx + 8, targetY + 30, cz)
+		banner.Anchored = true
+		banner.CanCollide = false
+		banner.CanQuery = false
+		banner.Material = Enum.Material.Neon
+		banner.Color = teamConfig.Color
+		banner.Parent = basesFolder
+
+		-- Team-colored light so the base is readable at a glance
+		local pointLight = Instance.new("PointLight")
+		pointLight.Color = teamConfig.Color
+		pointLight.Brightness = 4
+		pointLight.Range = 80
+		pointLight.Parent = pole
+
+		-- BillboardGui name label above the banner
+		local labelAnchor = Instance.new("Part")
+		labelAnchor.Name = "BaseLabel_" .. teamConfig.Name
+		labelAnchor.Size = Vector3.new(0.1, 0.1, 0.1)
+		labelAnchor.Anchored = true
+		labelAnchor.CanCollide = false
+		labelAnchor.CanQuery = false
+		labelAnchor.Transparency = 1
+		labelAnchor.CFrame = CFrame.new(cx, targetY + 44, cz)
+		labelAnchor.Parent = basesFolder
+
+		local billboard = Instance.new("BillboardGui")
+		billboard.Size = UDim2.fromOffset(200, 50)
+		billboard.StudsOffset = Vector3.new(0, 0, 0)
+		billboard.AlwaysOnTop = true
+		billboard.LightInfluence = 0
+		billboard.Parent = labelAnchor
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.fromScale(1, 1)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 28
+		label.TextColor3 = teamConfig.Color
+		label.TextStrokeTransparency = 0.3
+		label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+		label.Text = teamConfig.Name .. " BASE"
+		label.Parent = billboard
+	end
 end
 
 local function pickFoodTier()
@@ -611,30 +775,48 @@ function WormService:_spawnWorm(player: Player)
 	wormData.State = "Alive" :: WormState
 	wormData.Segments = WormConfig.InitialSegments
 	wormData.MaxSegments = WormConfig.InitialSegments
-	wormData.Direction = Vector3.new(0, 0, -1)
-	wormData.CurrentDirection = Vector3.new(0, 0, -1)
 	wormData.Boosting = false
 	wormData.Kills = 0
 	wormData.SpawnTime = os.clock()
 	wormData.LerpingSegments = nil
 
-	-- Respawn character at random arena position
-	local spawnPos = self:_randomArenaPosition()
+	-- Worm King: assign team FIRST so spawn position + facing can use it.
+	local teamIndex: number? = nil
+	if TeamService:IsEnabled() then
+		teamIndex = TeamService:AssignToTeam(player.Name)
+	end
+
+	-- Pick spawn at the team base (fall back to random arena if no team mode).
+	local spawnPos = self:_spawnPositionForTeam(teamIndex)
+	local spawnFacing = self:_spawnFacingForTeam(teamIndex)
+	wormData.Direction = spawnFacing
+	wormData.CurrentDirection = spawnFacing
+
+	-- 2-second spawn protection window; broken early by leaving safe zone or damaging others.
+	wormData.SpawnProtectionUntil = os.clock() + WormConfig.WormKing.SpawnProtectionDuration
+
 	player.RespawnLocation = nil
 	player:LoadCharacter()
 
 	local character = player.Character or player.CharacterAdded:Wait()
 	local hrp = character:WaitForChild("HumanoidRootPart") :: BasePart
-	hrp.CFrame = CFrame.new(spawnPos)
+	-- Orient HRP so segments are laid out behind the head along the facing direction
+	local lookAt = spawnPos + spawnFacing
+	hrp.CFrame = CFrame.lookAt(spawnPos, lookAt)
+
+	-- Seed cached position state so any gameplay reads before the first
+	-- _updateMovement tick get a sensible value (matches the just-set HRP CFrame).
+	wormData.HeadPosition = hrp.Position
+	wormData.HeadDirection = wormData.CurrentDirection
+	wormData.SegmentPositions = {}
 
 	-- Initialize position history before setting up character (so segments can read from it)
 	self:_initPositionHistory(wormData, spawnPos)
 
 	self:_setupCharacter(player, character)
 
-	-- Assign team and apply team color
-	if TeamService:IsEnabled() then
-		local teamIndex = TeamService:AssignToTeam(player.Name)
+	-- Apply team color
+	if teamIndex and teamIndex > 0 then
 		local teamColor = TeamService:GetTeamColor(teamIndex)
 		if teamColor then
 			wormData.Color = teamColor
@@ -648,6 +830,8 @@ function WormService:_spawnWorm(player: Player)
 		Segments = wormData.Segments,
 		Color = { wormData.Color.R, wormData.Color.G, wormData.Color.B },
 		Position = { spawnPos.X, spawnPos.Y, spawnPos.Z },
+		SpawnProtectionDuration = WormConfig.WormKing.SpawnProtectionDuration,
+		TeamIndex = teamIndex or 0,
 	})
 end
 
@@ -736,6 +920,11 @@ function WormService:DamageWorm(
 )
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
+		return
+	end
+
+	-- Worm King: spawn protection blocks all incoming damage during the invuln window.
+	if os.clock() < wormData.SpawnProtectionUntil then
 		return
 	end
 
@@ -979,16 +1168,27 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 	local effectiveRange = math.max(WormConfig.PassiveMagnetRange, powerUpMagnetRange)
 	local pullSpeed = if powerUpMagnetRange > 0 then WormConfig.PowerUpMagnetPull else WormConfig.PassiveMagnetPull
 
+	-- Gate Part.Position writes to 10Hz (every 6th Heartbeat) to stay within the
+	-- "Server Brain, Client Body" replication budget. Each write auto-replicates
+	-- to every client, so at 60Hz with ~20 worms × ~5 pulled food each this was
+	-- generating up to 6,000 Part replications/s — painful on cellular.
+	-- We multiply pullSpeed by 6 to preserve the original studs/second pull rate.
 	local foodFolder = self._foodFolder :: Folder
+	local magnetFlush = (self._broadcastTick % 6 == 0)
 	for _, food in foodFolder:GetChildren() do
 		if food:IsA("BasePart") then
 			local diff = food.Position - headPos
 			local dist = diff.Magnitude
 
 			-- Pull nearby food toward head
-			if effectiveRange > 0 and dist < effectiveRange and dist > WormConfig.CollisionRadius + 1 then
+			if
+				magnetFlush
+				and effectiveRange > 0
+				and dist < effectiveRange
+				and dist > WormConfig.CollisionRadius + 1
+			then
 				local pullDir = -diff.Unit
-				food.Position = food.Position + pullDir * pullSpeed
+				food.Position = food.Position + pullDir * (pullSpeed * 6)
 			end
 
 			if dist < WormConfig.CollisionRadius + 1 then
@@ -1037,7 +1237,14 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 		return
 	end
 
-	-- Check against other player segments
+	-- Worm King: spawn protection blocks worm-vs-worm collision death entirely.
+	if os.clock() < wormData.SpawnProtectionUntil then
+		return
+	end
+
+	-- Check against other player segments.
+	-- Read positions from otherData.SegmentPositions (updated every frame) rather than
+	-- seg.Position (only written at 10Hz), so collisions are still frame-accurate.
 	for otherPlayer, otherData in self._worms do
 		if otherPlayer == player or otherData.State ~= "Alive" then
 			continue
@@ -1058,9 +1265,18 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 			continue
 		end
 
+		local otherSegPositions = otherData.SegmentPositions
 		for _, seg in segFolder:GetChildren() do
 			if seg:IsA("BasePart") then
-				local segDist = (seg.Position - headPos).Magnitude
+				-- Segment names are "Segment<N>"; SegmentPositions is keyed by N.
+				local idx = tonumber(seg.Name:sub(8))
+				local segPos = if idx then otherSegPositions[idx] else nil
+				-- Fall back to the Part position if the cache hasn't been populated
+				-- yet (e.g. brand-new segment created mid-frame).
+				if not segPos then
+					segPos = seg.Position
+				end
+				local segDist = (segPos - headPos).Magnitude
 				if segDist < WormConfig.CollisionRadius * 2 then
 					-- Shield power-up: consume shield instead of dying
 					if PowerUpService:ConsumeShield(player.Name) then
@@ -1234,9 +1450,14 @@ function WormService:_updateSegments(player: Player)
 		return
 	end
 
-	-- Place each segment at the position the head was at (index * ENTRIES_PER_SEGMENT) entries ago
+	local shouldBroadcast = (self._broadcastTick % 6 == 0)
+
+	-- Place each segment at the position the head was at (index * ENTRIES_PER_SEGMENT) entries ago.
+	-- We always update wormData.SegmentPositions (source of truth for gameplay reads), but
+	-- only write to the actual Part.Position at 10Hz to limit replication bandwidth.
 	local segCount = math.floor(wormData.Segments)
 	local lerping = wormData.LerpingSegments
+	local segmentPositions = wormData.SegmentPositions
 	for i = 1, segCount do
 		local seg = segFolder:FindFirstChild("Segment" .. i) :: BasePart?
 		if not seg then
@@ -1247,23 +1468,39 @@ function WormService:_updateSegments(player: Player)
 		if histIndex >= wormData.HistoryStart and wormData.PositionHistory[histIndex] then
 			local target = wormData.PositionHistory[histIndex]
 			local lerpEntry = lerping and lerping[i] or nil
+			local resolved: Vector3? = nil
 			if lerpEntry then
 				local now = os.clock()
 				if now >= lerpEntry.StartTime then
 					-- Linear interpolation from start position to target over fixed duration
 					local elapsed = now - lerpEntry.StartTime
 					local t = math.min(1, elapsed / SEGMENT_LERP_DURATION)
-					seg.Position = lerpEntry.StartPos:Lerp(target, t)
+					resolved = lerpEntry.StartPos:Lerp(target, t)
 					if t >= 1 then
 						lerping[i] = nil
 					end
 				end
 				-- Pre-delay (StartTime not reached): leave segment in place
-				-- so the destroyed segment's gap is briefly visible.
+				-- so the destroyed segment's gap is briefly visible. Don't update
+				-- the cached position either; preserve whatever was last computed.
 			else
 				-- Not lerping: snap to target position from history
-				seg.Position = target
+				resolved = target
 			end
+
+			if resolved then
+				segmentPositions[i] = resolved
+				if shouldBroadcast then
+					seg.Position = resolved
+				end
+			end
+		end
+	end
+
+	-- Drop stale cached positions for segments that no longer exist (worm shrank).
+	for idx in segmentPositions do
+		if idx > segCount then
+			segmentPositions[idx] = nil
 		end
 	end
 
@@ -1356,6 +1593,8 @@ function WormService:_updateMovement(player: Player, dt: number)
 	local dir = Vector3.new(math.sin(newAngle), 0, math.cos(newAngle))
 	wormData.CurrentDirection = dir
 
+	local shouldBroadcast = (self._broadcastTick % 6 == 0)
+
 	-- Ground grapple pull: override direction and speed when active
 	if wormData.GrappleTarget then
 		local elapsed = os.clock() - wormData.GrappleStartTime
@@ -1381,12 +1620,19 @@ function WormService:_updateMovement(player: Player, dt: number)
 				wormData.CurrentDirection = dir
 			end
 
-			local newCFrame = CFrame.new(newPos, newPos + dir)
-			hrp.CFrame = newCFrame
+			-- Always update cached gameplay state every frame.
+			wormData.HeadPosition = newPos
+			wormData.HeadDirection = dir
 
-			local wormHead = character:FindFirstChild("WormHead") :: BasePart?
-			if wormHead then
-				wormHead.CFrame = newCFrame
+			-- Only write to Parts at 10Hz to limit anchored-Part replication.
+			if shouldBroadcast then
+				local newCFrame = CFrame.new(newPos, newPos + dir)
+				hrp.CFrame = newCFrame
+
+				local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+				if wormHead then
+					wormHead.CFrame = newCFrame
+				end
 			end
 
 			self:_recordPosition(wormData, newPos)
@@ -1394,18 +1640,31 @@ function WormService:_updateMovement(player: Player, dt: number)
 		end
 	end
 
-	-- Move HRP in direction (anchored, so CFrame set is authoritative)
+	-- Move HRP in direction (anchored, so CFrame set is authoritative).
+	-- Read from cached HeadPosition (source of truth) rather than hrp.Position,
+	-- since hrp is only updated at 10Hz.
 	local move = dir * speed * dt
-	local newPos = hrp.Position + move
-	newPos = Vector3.new(newPos.X, TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2, newPos.Z)
+	local newPos = wormData.HeadPosition + move
+	newPos = Vector3.new(
+		newPos.X,
+		TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2,
+		newPos.Z
+	)
 
-	local newCFrame = CFrame.new(newPos, newPos + dir)
-	hrp.CFrame = newCFrame
+	-- Always update cached gameplay state every frame.
+	wormData.HeadPosition = newPos
+	wormData.HeadDirection = dir
 
-	-- Move visual worm head to match
-	local wormHead = character:FindFirstChild("WormHead") :: BasePart?
-	if wormHead then
-		wormHead.CFrame = newCFrame
+	-- Only write to Parts at 10Hz to limit anchored-Part replication.
+	if shouldBroadcast then
+		local newCFrame = CFrame.new(newPos, newPos + dir)
+		hrp.CFrame = newCFrame
+
+		-- Move visual worm head to match
+		local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+		if wormHead then
+			wormHead.CFrame = newCFrame
+		end
 	end
 
 	-- Record position in history for segment following
@@ -1413,6 +1672,11 @@ function WormService:_updateMovement(player: Player, dt: number)
 end
 
 function WormService:_gameStep(dt: number)
+	-- Bump the broadcast tick at the top of the step. _updateMovement and
+	-- _updateSegments check `_broadcastTick % 6 == 0` to decide whether to write
+	-- to actual Part CFrames this frame (10Hz at 60fps).
+	self._broadcastTick += 1
+
 	-- Spawn food to maintain target count
 	local foodDeficit = WormConfig.MaxFoodOnMap - self._foodCount
 	if foodDeficit > 0 then
@@ -1439,7 +1703,9 @@ function WormService:_gameStep(dt: number)
 		self:_updateMovement(player, dt)
 		self:_updateSegments(player)
 
-		local headPos = hrp.Position
+		-- Read from cached HeadPosition (updated every frame by _updateMovement)
+		-- rather than hrp.Position, since the Part is only written at 10Hz.
+		local headPos = wormData.HeadPosition
 		self:_checkFoodCollection(player, headPos)
 		self:_checkWormCollisions(player, headPos)
 		self:_checkBounds(player, headPos)
@@ -1654,18 +1920,30 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 	end
 
 	local ghostConfig = WormConfig.Ghost
-	local gx, gz = math.random(-50, 50), math.random(-50, 50)
-	local spawnPos = Vector3.new(gx, TerrainHeight.getSurfaceY(gx, gz) + 2, gz)
+
+	-- Worm King: ghosts respawn at their team's base (instead of a random corner of the map).
+	-- Pick a spawn near the team base using the base spawn ring helper. If the player has no
+	-- team yet (edge case: ghost called before team assignment), fall back to near-origin.
+	local spawnPos: Vector3
+	local teamIndex: number? = nil
+	if TeamService:IsEnabled() then
+		teamIndex = TeamService:GetTeamForMember(player.Name)
+	end
+	if teamIndex and teamIndex > 0 then
+		local scale = if SandTideService then SandTideService:GetScale() else 1.0
+		local baseSpawn = TeamBase.getScaledSpawnPosition(teamIndex, scale, nil)
+		spawnPos = Vector3.new(baseSpawn.X, baseSpawn.Y + 2, baseSpawn.Z)
+	else
+		local gx, gz = math.random(-50, 50), math.random(-50, 50)
+		spawnPos = Vector3.new(gx, TerrainHeight.getSurfaceY(gx, gz) + 2, gz)
+	end
 
 	-- Determine ghost color (team color if team mode, default ghostly blue otherwise)
 	local ghostColor = Color3.fromRGB(180, 200, 255)
-	if TeamService:IsEnabled() then
-		local teamIndex = TeamService:GetTeamForMember(player.Name)
-		if teamIndex then
-			local teamColor = TeamService:GetTeamColor(teamIndex)
-			if teamColor then
-				ghostColor = teamColor
-			end
+	if teamIndex then
+		local teamColor = TeamService:GetTeamColor(teamIndex)
+		if teamColor then
+			ghostColor = teamColor
 		end
 	end
 
@@ -1758,6 +2036,17 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 	-- Tag ghost for hit detection (used by WeaponService)
 	ghost:SetAttribute("IsGhost", true)
 	ghost:SetAttribute("GhostOwner", player.Name)
+
+	-- Worm King: team-tinted outline so ghosts are instantly readable (and never invisible).
+	-- Highlight renders a constant-width outline visible through occlusion, anchored to the model.
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "GhostTeamOutline"
+	highlight.FillColor = ghostColor
+	highlight.FillTransparency = 0.75 -- subtle body tint
+	highlight.OutlineColor = ghostColor
+	highlight.OutlineTransparency = 0
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.Parent = ghost
 
 	ghost.Parent = workspace
 
@@ -2063,6 +2352,11 @@ function WormService:GetWormData_Server(player: Player): WormData?
 	return self._worms[player]
 end
 
+-- Server-side helper used by MarksService (avoids reaching into _ghosts table).
+function WormService:IsGhostPlayer(player: Player): boolean
+	return self._ghosts[player] ~= nil
+end
+
 --------------------------------------------------
 -- Client methods
 --------------------------------------------------
@@ -2161,6 +2455,10 @@ local function newWormData(color: Color3): WormData
 		GrappleStartTime = 0,
 		GrappleStartPos = nil,
 		GrappleCooldownEnd = 0,
+		HeadPosition = Vector3.zero, -- Overwritten on first movement / spawn
+		HeadDirection = Vector3.new(0, 0, -1),
+		SegmentPositions = {},
+		SpawnProtectionUntil = 0, -- Worm King spawn invuln; set in _spawnWorm
 	}
 end
 
@@ -2170,6 +2468,7 @@ function WormService:KnitStart()
 	TeamService = require(script.Parent.TeamService)
 	WeaponService = require(script.Parent.WeaponService)
 	LeaderboardService = require(script.Parent.LeaderboardService)
+	SandTideService = require(script.Parent.SandTideService)
 
 	self:_createArena()
 	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)

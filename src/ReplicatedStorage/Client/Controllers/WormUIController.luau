@@ -1,5 +1,6 @@
 --!strict
 
+local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -9,6 +10,7 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local PlatformUtil = require(ReplicatedStorage.Shared.PlatformUtil)
+local TeamBase = require(ReplicatedStorage.Shared.TeamBase)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -16,6 +18,17 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local PERIODIC_UPDATE_INTERVAL = 2
 local KILL_FEED_DURATION = 4
 local MAX_KILL_FEED = 5
+
+-- Crown carry offset (studs above carrier head). Must match the value in
+-- CrownService on the server. While the Crown is Carried we position it on
+-- the client every frame so it follows the head smoothly without 10Hz jitter.
+local CROWN_CARRY_OFFSET_Y = 4.5
+
+-- Vertical offset to add to top-anchored HUD elements so they clear the Roblox
+-- topbar (and the iPhone/Android notch area). ScreenGui has IgnoreGuiInset=true
+-- so (0,0,0,0) is the absolute top-left of the screen; GetGuiInset().Y returns
+-- the reserved topbar height (~36pt, larger on notch devices).
+local TOP_INSET = GuiService:GetGuiInset().Y
 
 local POWERUP_COLORS = {
 	SPEED = Color3.fromRGB(0, 200, 255),
@@ -38,8 +51,8 @@ local WormUIController = Knit.CreateController({
 	_killFeedFrame = nil :: Frame?,
 	_minimapFrame = nil :: Frame?,
 	_minimapArrow = nil :: Frame?,
-	_minimapDebugLabel = nil :: TextLabel?,
 	_boostButton = nil :: ImageButton?,
+	_grappleButton = nil :: ImageButton?,
 	_powerUpFrame = nil :: Frame?,
 	_powerUpLabel = nil :: TextLabel?,
 	_powerUpTimer = nil :: TextLabel?,
@@ -85,6 +98,28 @@ local WormUIController = Knit.CreateController({
 
 	-- Rider notification (shown to worm player when a ghost rides them)
 	_riderNotifyLabel = nil :: TextLabel?,
+
+	-- Worm King: Marks HUD + respawn button (ghost mode)
+	_marksService = nil :: any,
+	_ghostHudFrame = nil :: Frame?,
+	_marksLabel = nil :: TextLabel?,
+	_respawnBtn = nil :: TextButton?,
+	_respawnStatusLbl = nil :: TextLabel?,
+	_currentMarks = 0,
+
+	-- Worm King: match timer + lockdown banner
+	_roundService = nil :: any,
+	_matchTimerFrame = nil :: Frame?,
+	_matchTimerLabel = nil :: TextLabel?,
+	_matchTimerStroke = nil :: UIStroke?,
+	_lockdownBanner = nil :: Frame?,
+	_lockdownLabel = nil :: TextLabel?,
+	_matchPhase = "Active",
+
+	-- Worm King: sand tide state (cached scale broadcast from SandTideService)
+	_sandTideService = nil :: any,
+	_sandTideScale = 1.0,
+	_teamModeActive = false, -- true when the round is a Worm King (team) match
 })
 
 --------------------------------------------------
@@ -140,6 +175,7 @@ function WormUIController:_buildUI()
 	self:_buildKillFeed(gui)
 	self:_buildMinimap(gui)
 	self:_buildBoostButton(gui)
+	self:_buildGrappleButton(gui)
 	self:_buildPowerUpDisplay(gui)
 	self:_buildGameTimer(gui)
 	self:_buildZoneWarning(gui)
@@ -149,13 +185,436 @@ function WormUIController:_buildUI()
 	self:_buildCrosshair(gui)
 	self:_buildToolbar(gui)
 	self:_buildRiderNotification(gui)
+	self:_buildTeamScoreHUD(gui)
+	self:_buildCrownCarrierBanner(gui)
+	self:_buildGhostHud(gui)
+	self:_buildMatchTimerHUD(gui)
+	self:_buildLockdownBanner(gui)
+end
+
+-- Worm King: large countdown clock at top-left (out of the SegmentCounter's way).
+-- Red-glow when ≤ 60s remain; border turns red during Lockdown.
+function WormUIController:_buildMatchTimerHUD(parent: ScreenGui)
+	local frame = Instance.new("Frame")
+	frame.Name = "MatchTimer"
+	frame.Size = UDim2.new(0, 110, 0, 44)
+	frame.Position = UDim2.new(0, 10, 0, 10 + TOP_INSET)
+	frame.AnchorPoint = Vector2.new(0, 0)
+	frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+	frame.BackgroundTransparency = 0.2
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.ZIndex = 4
+	frame.Parent = parent
+	self._matchTimerFrame = frame
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 10)
+	corner.Parent = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(140, 180, 255)
+	stroke.Thickness = 1.5
+	stroke.Transparency = 0.35
+	stroke.Parent = frame
+	self._matchTimerStroke = stroke
+
+	local lbl = createTextLabel({
+		Name = "Clock",
+		Text = "8:00",
+		Size = UDim2.new(1, 0, 1, 0),
+		Position = UDim2.fromScale(0, 0),
+		TextSize = 26,
+		TextColor3 = Color3.fromRGB(235, 240, 255),
+		Font = Enum.Font.GothamBold,
+		Parent = frame,
+	})
+	lbl.ZIndex = 5
+	self._matchTimerLabel = lbl
+end
+
+-- Worm King: full-width banner shown below the team score chips when lockdown begins.
+function WormUIController:_buildLockdownBanner(parent: ScreenGui)
+	local frame = Instance.new("Frame")
+	frame.Name = "LockdownBanner"
+	-- Width is 95% of screen up to a max of 420pt so the banner shrinks on
+	-- narrow screens (e.g. iPhone SE at 375pt) instead of bleeding off-edge.
+	frame.Size = UDim2.new(0.95, 0, 0, 34)
+	frame.Position = UDim2.new(0.5, 0, 0, 120 + TOP_INSET)
+	frame.AnchorPoint = Vector2.new(0.5, 0)
+	frame.BackgroundColor3 = Color3.fromRGB(160, 30, 30)
+	frame.BackgroundTransparency = 0.1
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.ZIndex = 4
+	frame.Parent = parent
+	self._lockdownBanner = frame
+
+	local sizeConstraint = Instance.new("UISizeConstraint")
+	sizeConstraint.MaxSize = Vector2.new(420, math.huge)
+	sizeConstraint.Parent = frame
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(255, 200, 200)
+	stroke.Thickness = 1.4
+	stroke.Transparency = 0.1
+	stroke.Parent = frame
+
+	local lbl = createTextLabel({
+		Name = "Text",
+		Text = "⚠ LOCKDOWN — LAST TEAM STANDING WINS ⚠",
+		Size = UDim2.new(1, 0, 1, 0),
+		Position = UDim2.fromScale(0, 0),
+		TextSize = 14,
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		Font = Enum.Font.GothamBold,
+		Parent = frame,
+	})
+	lbl.ZIndex = 5
+	self._lockdownLabel = lbl
+end
+
+-- Update match timer text + color based on remaining seconds.
+function WormUIController:_updateMatchTimer(remaining: number, phase: string)
+	if not self._matchTimerFrame then
+		return
+	end
+	self._matchTimerFrame.Visible = true
+	self._matchPhase = phase
+
+	if self._matchTimerLabel then
+		local total = math.max(0, math.floor(remaining + 0.5))
+		local mins = math.floor(total / 60)
+		local secs = total % 60
+		self._matchTimerLabel.Text = string.format("%d:%02d", mins, secs)
+
+		-- Color urgency: last 60s = red, last 10s = flashing red
+		if remaining <= 10 then
+			self._matchTimerLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+		elseif remaining <= 60 or phase == "Lockdown" then
+			self._matchTimerLabel.TextColor3 = Color3.fromRGB(255, 180, 100)
+		else
+			self._matchTimerLabel.TextColor3 = Color3.fromRGB(235, 240, 255)
+		end
+	end
+
+	if self._matchTimerStroke then
+		self._matchTimerStroke.Color = if phase == "Lockdown"
+			then Color3.fromRGB(255, 140, 140)
+			else Color3.fromRGB(140, 180, 255)
+	end
+
+	-- Lockdown banner visibility toggles with phase
+	if self._lockdownBanner then
+		self._lockdownBanner.Visible = (phase == "Lockdown")
+	end
+end
+
+function WormUIController:_hideMatchTimer()
+	if self._matchTimerFrame then
+		self._matchTimerFrame.Visible = false
+	end
+	if self._lockdownBanner then
+		self._lockdownBanner.Visible = false
+	end
+end
+
+-- Worm King: compact widget at top-center showing Marks + Respawn button.
+-- Visible whenever the local player is a ghost OR on the death screen.
+function WormUIController:_buildGhostHud(parent: ScreenGui)
+	-- GhostHud sits below the CrownCarrierBanner (banner is 32px tall at y=130,
+	-- so start this frame at y=175 to leave a 13px gap). Internal layout:
+	--   marks (24) + gap(4) + respawn button (btnH) + gap(4) + status (18)
+	-- so total = 54 + btnH. Height grows on touch for the 48pt button.
+	local btnHeight = PlatformUtil.MinTouchSize(32)
+	local ghostHudHeight = 54 + btnHeight
+	local frame = Instance.new("Frame")
+	frame.Name = "GhostHud"
+	frame.Size = UDim2.new(0, 260, 0, ghostHudHeight)
+	frame.Position = UDim2.new(0.5, 0, 0, 175 + TOP_INSET)
+	frame.AnchorPoint = Vector2.new(0.5, 0)
+	frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+	frame.BackgroundTransparency = 0.25
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.ZIndex = 4
+	frame.Parent = parent
+	self._ghostHudFrame = frame
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 10)
+	corner.Parent = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(120, 180, 255)
+	stroke.Thickness = 1.2
+	stroke.Transparency = 0.4
+	stroke.Parent = frame
+
+	-- Marks counter (top row)
+	local marksLabel = createTextLabel({
+		Name = "Marks",
+		Text = "★ 0 Marks",
+		Size = UDim2.new(1, -16, 0, 24),
+		Position = UDim2.new(0, 8, 0, 4),
+		TextSize = 18,
+		TextColor3 = Color3.fromRGB(255, 220, 100),
+		Font = Enum.Font.GothamBold,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = frame,
+	})
+	marksLabel.ZIndex = 5
+	self._marksLabel = marksLabel
+
+	-- Respawn button. Apple HIG + Google Material both recommend a 44–48pt
+	-- minimum touch target; MinTouchSize(32) gives 32pt on desktop and 48pt on
+	-- touch so finger taps don't miss. Uses btnHeight computed at frame-level.
+	local btn = Instance.new("TextButton")
+	btn.Name = "RespawnBtn"
+	btn.Size = UDim2.new(1, -16, 0, btnHeight)
+	btn.Position = UDim2.new(0, 8, 0, 32)
+	btn.AnchorPoint = Vector2.new(0, 0)
+	btn.BackgroundColor3 = Color3.fromRGB(40, 140, 70)
+	btn.BackgroundTransparency = 0.15
+	btn.BorderSizePixel = 0
+	btn.Text = string.format("Respawn as Worm (%d Marks)", WormConfig.WormKing.RespawnCost)
+	btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	btn.TextSize = 16
+	btn.Font = Enum.Font.GothamBold
+	btn.AutoButtonColor = true
+	btn.ZIndex = 5
+	btn.Parent = frame
+
+	local btnCorner = Instance.new("UICorner")
+	btnCorner.CornerRadius = UDim.new(0, 8)
+	btnCorner.Parent = btn
+
+	self._respawnBtn = btn
+
+	-- Reason/status line (shown under button on failure, or during lockout).
+	local statusLbl = createTextLabel({
+		Name = "Status",
+		Text = "",
+		Size = UDim2.new(1, -16, 0, 18),
+		Position = UDim2.new(0, 8, 1, -20),
+		TextSize = 13,
+		TextColor3 = Color3.fromRGB(255, 120, 120),
+		Font = Enum.Font.Gotham,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Parent = frame,
+	})
+	statusLbl.ZIndex = 5
+	self._respawnStatusLbl = statusLbl
+end
+
+-- Update text + button enabled state based on current Marks total.
+function WormUIController:_updateMarksUI(marks: number)
+	self._currentMarks = marks
+	if self._marksLabel then
+		self._marksLabel.Text = string.format("★ %d Marks", marks)
+	end
+	if self._respawnBtn then
+		local cost = WormConfig.WormKing.RespawnCost
+		local canAfford = marks >= cost
+		self._respawnBtn.BackgroundColor3 = if canAfford
+			then Color3.fromRGB(40, 140, 70)
+			else Color3.fromRGB(70, 70, 70)
+		self._respawnBtn.AutoButtonColor = canAfford
+	end
+end
+
+-- Show/hide the ghost hud (called on death, spawn, ghost toggle).
+function WormUIController:_setGhostHudVisible(visible: boolean)
+	if self._ghostHudFrame then
+		self._ghostHudFrame.Visible = visible
+	end
+	if not visible and self._respawnStatusLbl then
+		self._respawnStatusLbl.Text = ""
+	end
+end
+
+-- Display a brief status line under the respawn button (e.g. "Not enough Marks").
+function WormUIController:_showRespawnStatus(text: string, isError: boolean)
+	if not self._respawnStatusLbl then
+		return
+	end
+	self._respawnStatusLbl.Text = text
+	self._respawnStatusLbl.TextColor3 = if isError then Color3.fromRGB(255, 120, 120) else Color3.fromRGB(180, 220, 180)
+end
+
+-- Worm King: horizontal row of 3 colored team score chips, top center under segment counter.
+function WormUIController:_buildTeamScoreHUD(parent: ScreenGui)
+	local container = Instance.new("Frame")
+	container.Name = "TeamScoreHUD"
+	-- 95% of screen width capped at 420pt — 3 team chips (120pt each + 8pt gaps)
+	-- fit in 376pt, so on phones narrower than ~396pt this will compress.
+	container.Size = UDim2.new(0.95, 0, 0, 44)
+	container.Position = UDim2.new(0.5, 0, 0, 70 + TOP_INSET)
+	container.AnchorPoint = Vector2.new(0.5, 0)
+	container.BackgroundTransparency = 1
+	container.Parent = parent
+	self._teamScoreHUD = container
+
+	local sizeConstraint = Instance.new("UISizeConstraint")
+	sizeConstraint.MaxSize = Vector2.new(420, math.huge)
+	sizeConstraint.Parent = container
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Horizontal
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.Padding = UDim.new(0, 8)
+	layout.Parent = container
+
+	self._teamScoreChips = {}
+	for i, teamCfg in WormConfig.TeamColors do
+		local chip = Instance.new("Frame")
+		chip.Name = "ScoreChip_" .. teamCfg.Name
+		chip.Size = UDim2.new(0, 120, 0, 40)
+		chip.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+		chip.BackgroundTransparency = 0.35
+		chip.BorderSizePixel = 0
+		chip.Parent = container
+		chip.LayoutOrder = i
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 8)
+		corner.Parent = chip
+
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = teamCfg.Color
+		stroke.Thickness = 2
+		stroke.Parent = chip
+
+		local nameLbl = createTextLabel({
+			Name = "TeamName",
+			Text = teamCfg.Name,
+			Size = UDim2.new(0.5, -4, 1, 0),
+			Position = UDim2.new(0, 6, 0, 0),
+			TextSize = 14,
+			TextColor3 = teamCfg.Color,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = chip,
+		})
+		nameLbl.Font = Enum.Font.GothamBold
+
+		local scoreLbl = createTextLabel({
+			Name = "Score",
+			Text = "0",
+			Size = UDim2.new(0.5, -6, 1, 0),
+			Position = UDim2.new(0.5, 0, 0, 0),
+			TextSize = 22,
+			TextColor3 = Color3.fromRGB(255, 255, 255),
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Parent = chip,
+		})
+		scoreLbl.Font = Enum.Font.GothamBold
+
+		self._teamScoreChips[i] = scoreLbl
+	end
+
+	-- Threshold caption
+	local thresh = createTextLabel({
+		Name = "Threshold",
+		Text = "First to " .. tostring(WormConfig.WormKing.ScoreThreshold),
+		Size = UDim2.new(1, 0, 0, 18),
+		Position = UDim2.new(0, 0, 1, 2),
+		TextSize = 13,
+		TextColor3 = Color3.fromRGB(200, 200, 200),
+		Parent = container,
+	})
+	thresh.Font = Enum.Font.Gotham
+end
+
+-- Worm King: banner shown across the top of the screen announcing the Crown carrier.
+function WormUIController:_buildCrownCarrierBanner(parent: ScreenGui)
+	local banner = Instance.new("Frame")
+	banner.Name = "CrownCarrierBanner"
+	banner.Size = UDim2.new(0.9, 0, 0, 32)
+	banner.Position = UDim2.new(0.5, 0, 0, 130 + TOP_INSET)
+	banner.AnchorPoint = Vector2.new(0.5, 0)
+	banner.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	banner.BackgroundTransparency = 0.4
+	banner.BorderSizePixel = 0
+	banner.Visible = false
+	banner.Parent = parent
+	self._crownCarrierBanner = banner
+
+	local sizeConstraint = Instance.new("UISizeConstraint")
+	sizeConstraint.MaxSize = Vector2.new(380, math.huge)
+	sizeConstraint.Parent = banner
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = banner
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(255, 220, 60)
+	stroke.Thickness = 2
+	stroke.Parent = banner
+
+	local label = createTextLabel({
+		Name = "CarrierText",
+		Text = "",
+		Size = UDim2.fromScale(1, 1),
+		Position = UDim2.fromScale(0, 0),
+		TextSize = 18,
+		TextColor3 = Color3.fromRGB(255, 220, 60),
+		Parent = banner,
+	})
+	label.Font = Enum.Font.GothamBold
+	self._crownCarrierLabel = label
+end
+
+function WormUIController:_updateTeamScores(snapshot: { { TeamIndex: number, Score: number } })
+	if not self._teamScoreChips then
+		return
+	end
+	for _, entry in snapshot do
+		local lbl = self._teamScoreChips[entry.TeamIndex]
+		if lbl then
+			lbl.Text = tostring(entry.Score)
+		end
+	end
+end
+
+function WormUIController:_updateCrownCarrier(carrierName: string?, isPlayer: boolean?, teamIndex: number?)
+	local banner = self._crownCarrierBanner
+	local label = self._crownCarrierLabel
+	if not banner or not label then
+		return
+	end
+
+	if not carrierName then
+		banner.Visible = false
+		return
+	end
+
+	local color = Color3.fromRGB(255, 220, 60)
+	if teamIndex and teamIndex > 0 and WormConfig.TeamColors[teamIndex] then
+		color = WormConfig.TeamColors[teamIndex].Color
+	end
+
+	if carrierName == LocalPlayer.Name then
+		label.Text = "★ YOU HAVE THE CROWN ★"
+		label.TextColor3 = Color3.fromRGB(255, 240, 100)
+	else
+		local suffix = if isPlayer == false then " (bot)" else ""
+		label.Text = string.format("%s has the Crown%s", carrierName, suffix)
+		label.TextColor3 = color
+	end
+	banner.Visible = true
 end
 
 function WormUIController:_buildSegmentCounter(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "SegmentCounter"
 	frame.Size = UDim2.new(0.15, 0, 0, PlatformUtil.MinTouchSize(50))
-	frame.Position = UDim2.new(0.5, 0, 0, 10)
+	frame.Position = UDim2.new(0.5, 0, 0, 10 + TOP_INSET)
 	frame.AnchorPoint = Vector2.new(0.5, 0)
 	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 	frame.BackgroundTransparency = 0.5
@@ -426,21 +885,6 @@ function WormUIController:_buildMinimap(parent: ScreenGui)
 
 	self._minimapArrow = arrow
 
-	-- Debug coordinate label (temporary — remove after verifying minimap orientation)
-	local debugLabel = Instance.new("TextLabel")
-	debugLabel.Name = "MinimapDebug"
-	debugLabel.Size = UDim2.new(1, 0, 0, 10)
-	debugLabel.Position = UDim2.new(0, 0, 1, 2)
-	debugLabel.BackgroundTransparency = 1
-	debugLabel.Text = ""
-	debugLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-	debugLabel.Font = Enum.Font.Code
-	debugLabel.TextSize = 8
-	debugLabel.TextXAlignment = Enum.TextXAlignment.Center
-	debugLabel.ZIndex = 15
-	debugLabel.Parent = frame
-	self._minimapDebugLabel = debugLabel
-
 	-- Shift minimap up on touch devices to make room for boost button
 	if UserInputService.TouchEnabled then
 		frame.Position = UDim2.new(1, -10, 1, -120)
@@ -503,6 +947,71 @@ function WormUIController:_buildBoostButton(parent: ScreenGui)
 			if self._wormController then
 				self._wormController:SetBoosting(false)
 			end
+		end
+	end)
+end
+
+-- Touch-only on-screen Grapple button. Sits to the left of the BoostButton so
+-- the right thumb can alternate between the two without re-gripping. On
+-- desktop the grapple is bound to RMB / E (alive) or RMB / L2 (ghost); this
+-- button is the mobile-friendly parallel and works in both alive and ghost
+-- states (WormController:FireGrapple dispatches internally).
+function WormUIController:_buildGrappleButton(parent: ScreenGui)
+	if not UserInputService.TouchEnabled then
+		return
+	end
+
+	local button = Instance.new("ImageButton")
+	button.Name = "GrappleButton"
+	button.Size = UDim2.new(0, 90, 0, 90)
+	-- BoostButton anchors at (1,1) with offset (-30,-10) and size 100x100, so its
+	-- left edge sits ~130px in. Place the Grapple button ~20px further left.
+	button.Position = UDim2.new(1, -150, 1, -15)
+	button.AnchorPoint = Vector2.new(1, 1)
+	button.BackgroundColor3 = Color3.fromRGB(80, 180, 255)
+	button.BackgroundTransparency = 0.3
+	button.BorderSizePixel = 0
+	button.Image = ""
+	button.AutoButtonColor = false
+	button.Parent = parent
+	self._grappleButton = button
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = button
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(150, 220, 255)
+	stroke.Thickness = 3
+	stroke.Parent = button
+
+	createTextLabel({
+		Name = "Label",
+		Text = "GRAPPLE",
+		Size = UDim2.fromScale(1, 1),
+		Position = UDim2.fromScale(0, 0),
+		TextSize = 18,
+		Font = Enum.Font.GothamBold,
+		TextColor3 = Color3.new(1, 1, 1),
+		Parent = button,
+	})
+
+	-- Fire on press down (matches the keyboard binding being InputBegan, not
+	-- Activated — keeps perceived latency consistent between mouse and touch).
+	button.InputBegan:Connect(function(input: InputObject)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			button.BackgroundTransparency = 0.1
+			button.BackgroundColor3 = Color3.fromRGB(140, 210, 255)
+			if self._wormController then
+				self._wormController:FireGrapple()
+			end
+		end
+	end)
+
+	button.InputEnded:Connect(function(input: InputObject)
+		if input.UserInputType == Enum.UserInputType.Touch then
+			button.BackgroundTransparency = 0.3
+			button.BackgroundColor3 = Color3.fromRGB(80, 180, 255)
 		end
 	end)
 end
@@ -698,7 +1207,7 @@ function WormUIController:_buildCoinDisplay(parent: ScreenGui)
 	local frame = Instance.new("Frame")
 	frame.Name = "CoinDisplay"
 	frame.Size = UDim2.new(0.1, 0, 0, 40)
-	frame.Position = UDim2.new(1, -10, 0, 10)
+	frame.Position = UDim2.new(1, -10, 0, 10 + TOP_INSET)
 	frame.AnchorPoint = Vector2.new(1, 0)
 	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 	frame.BackgroundTransparency = 0.5
@@ -843,7 +1352,6 @@ function WormUIController:_buildToolbar(parent: ScreenGui)
 	self._weaponSlotLabel = weaponSlot.Label
 	self._weaponSlotAmmo = weaponSlot.Ammo
 	self._weaponSlotStroke = weaponSlot.Stroke
-
 end
 
 function WormUIController:_buildRiderNotification(parent: ScreenGui)
@@ -953,10 +1461,10 @@ function WormUIController:_buildToolbarSlot(
 	local hintLabel = createTextLabel({
 		Name = "Hint",
 		Text = actionHint,
-		Size = UDim2.new(1, -12, 0, 16),
+		Size = UDim2.new(1, -12, 0, 18),
 		Position = UDim2.new(0, 6, 1, -4),
 		AnchorPoint = Vector2.new(0, 1),
-		TextSize = 11,
+		TextSize = 13,
 		TextColor3 = Color3.fromRGB(140, 140, 140),
 		Font = Enum.Font.Gotham,
 		TextXAlignment = Enum.TextXAlignment.Left,
@@ -1192,6 +1700,30 @@ function WormUIController:_addKillFeedEntry(deadName: string, killerName: string
 	end
 end
 
+-- While the Crown is Carried, the server stops flushing the Crown Part's CFrame
+-- (at 10Hz that looked choppy). We pin the Crown to the carrier's head every
+-- frame locally — for remote carriers this still matches Roblox's per-frame
+-- interpolation of their replicated head, so the crown reads as smooth.
+function WormUIController:_updateCrownCarryPosition()
+	local snap = self._crownSnapshot
+	if not snap or snap.StateName ~= "Carried" or not snap.CarrierName then
+		return
+	end
+	local crownModel = workspace:FindFirstChild("Crown")
+	if not crownModel or not crownModel:IsA("Model") then
+		return
+	end
+	local carrierModel = workspace:FindFirstChild(snap.CarrierName)
+	if not carrierModel or not carrierModel:IsA("Model") then
+		return
+	end
+	local head = carrierModel:FindFirstChild("WormHead") :: BasePart?
+	if not head then
+		return
+	end
+	crownModel:PivotTo(CFrame.new(head.Position + Vector3.new(0, CROWN_CARRY_OFFSET_Y, 0)))
+end
+
 function WormUIController:_updateMinimapArrow()
 	local arrow = self._minimapArrow
 	if not arrow then
@@ -1314,15 +1846,65 @@ function WormUIController:_worldToMinimapScale(worldPos: Vector3): (number, numb
 	end
 end
 
+-- Worm King: draw the sand tide triangle (3 edges) on the minimap at the current scale.
+-- Each edge is a thin UDim2-based Frame rotated to connect two minimap-space vertices.
+function WormUIController:_drawMinimapTriangle(minimap: Frame, scale: number)
+	-- Compute world-space scaled vertices, then convert each to minimap fraction.
+	local vs = TeamBase.getScaledVertices(scale)
+	local mw = minimap.AbsoluteSize.X
+	local mh = minimap.AbsoluteSize.Y
+	if mw <= 0 or mh <= 0 then
+		return
+	end
+	local pts: { { x: number, y: number } } = {}
+	for _, v in vs do
+		local mx, my = self:_worldToMinimapScale(v)
+		table.insert(pts, { x = mx * mw, y = my * mh })
+	end
+
+	-- Edge color: orange (warning) when past the first contraction threshold, red when close to min.
+	local edgeColor = Color3.fromRGB(255, 180, 50)
+	if scale <= 0.35 then
+		edgeColor = Color3.fromRGB(255, 60, 60)
+	elseif scale >= 0.9 then
+		edgeColor = Color3.fromRGB(255, 220, 120)
+	end
+
+	for i = 1, 3 do
+		local a = pts[i]
+		local b = pts[(i % 3) + 1]
+		local dx = b.x - a.x
+		local dy = b.y - a.y
+		local length = math.sqrt(dx * dx + dy * dy)
+		if length < 1 then
+			continue
+		end
+		local angle = math.deg(math.atan2(dy, dx))
+		local midX = (a.x + b.x) * 0.5
+		local midY = (a.y + b.y) * 0.5
+
+		local edge = Instance.new("Frame")
+		edge.Name = "TideEdge"
+		edge.AnchorPoint = Vector2.new(0.5, 0.5)
+		edge.Position = UDim2.fromOffset(midX, midY)
+		edge.Size = UDim2.fromOffset(length, 2)
+		edge.Rotation = angle
+		edge.BackgroundColor3 = edgeColor
+		edge.BorderSizePixel = 0
+		edge.ZIndex = 6
+		edge.Parent = minimap
+	end
+end
+
 function WormUIController:_updateMinimap()
 	local minimap = self._minimapFrame
 	if not minimap then
 		return
 	end
 
-	-- Clear old dots and arrows (keep ShrinkCircle and UICorner/UIStroke)
+	-- Clear old dots, arrows, and triangle edges (keep ShrinkCircle and UICorner/UIStroke)
 	for _, child in minimap:GetChildren() do
-		if child.Name == "Dot" and (child:IsA("Frame") or child:IsA("TextLabel")) then
+		if (child.Name == "Dot" or child.Name == "TideEdge") and (child:IsA("Frame") or child:IsA("TextLabel")) then
 			child:Destroy()
 		end
 	end
@@ -1407,11 +1989,54 @@ function WormUIController:_updateMinimap()
 		end
 	end
 
-	-- Update shrink zone circle
+	-- Update shrink zone circle (hidden in Worm King team mode — sand tide triangle replaces it)
 	if self._shrinkCircle then
-		local halfArena = WormConfig.ArenaSize / 2
-		local radiusFraction = self._currentZoneRadius / halfArena
-		self._shrinkCircle.Size = UDim2.fromScale(math.clamp(radiusFraction, 0, 1), math.clamp(radiusFraction, 0, 1))
+		if self._teamModeActive then
+			self._shrinkCircle.Visible = false
+		else
+			self._shrinkCircle.Visible = true
+			local halfArena = WormConfig.ArenaSize / 2
+			local radiusFraction = self._currentZoneRadius / halfArena
+			self._shrinkCircle.Size =
+				UDim2.fromScale(math.clamp(radiusFraction, 0, 1), math.clamp(radiusFraction, 0, 1))
+		end
+	end
+
+	-- Worm King: sand tide triangle edges. Draw the 3 scaled vertices connected
+	-- by thin rotated Frames so players see the contracting playable area.
+	if self._teamModeActive then
+		self:_drawMinimapTriangle(minimap, self._sandTideScale)
+	end
+
+	-- Worm King: Crown marker (gold dot). Read position directly from the workspace
+	-- Crown Part (auto-replicated at 10Hz by the server). Hidden while Inactive —
+	-- the CrownPickedUp/Dropped/Returned/Spawned signals still drive `StateName`.
+	local crownSnap = self._crownSnapshot
+	if crownSnap and crownSnap.StateName ~= "Inactive" then
+		local crownModel = workspace:FindFirstChild("Crown") :: Model?
+		local crownPart = if crownModel then crownModel.PrimaryPart else nil
+		if crownPart then
+			local cmx, cmy = self:_worldToMinimapScale(crownPart.Position)
+
+			local crownDot = Instance.new("Frame")
+			crownDot.Name = "Dot"
+			crownDot.Size = UDim2.new(0, 10, 0, 10)
+			crownDot.Position = UDim2.fromScale(cmx, cmy)
+			crownDot.AnchorPoint = Vector2.new(0.5, 0.5)
+			crownDot.BorderSizePixel = 0
+			crownDot.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
+			crownDot.ZIndex = 5
+			crownDot.Parent = minimap
+
+			local crownCorner = Instance.new("UICorner")
+			crownCorner.CornerRadius = UDim.new(1, 0)
+			crownCorner.Parent = crownDot
+
+			local crownStroke = Instance.new("UIStroke")
+			crownStroke.Color = Color3.fromRGB(80, 50, 0)
+			crownStroke.Thickness = 1
+			crownStroke.Parent = crownDot
+		end
 	end
 end
 
@@ -1495,8 +2120,119 @@ function WormUIController:KnitStart()
 	self._weaponController = Knit.GetController("WeaponController")
 	self._powerUpService = Knit.GetService("PowerUpService")
 	self._coinService = Knit.GetService("CoinService")
+	self._crownService = Knit.GetService("CrownService")
+	self._marksService = Knit.GetService("MarksService")
+	self._roundService = Knit.GetService("RoundService")
+	self._sandTideService = Knit.GetService("SandTideService")
+
+	-- Cached Crown snapshot used by _updateMinimap to decide whether to draw the
+	-- gold Crown marker. Position comes from the workspace Crown Part directly,
+	-- so only `StateName` and `CarrierName` are tracked here.
+	self._crownSnapshot = {
+		StateName = "Inactive",
+		CarrierName = nil :: string?,
+	}
 
 	self:_buildUI()
+
+	-- Worm King: seed team scores + Crown state on start
+	task.spawn(function()
+		local ok, state = self._crownService:GetState():await()
+		if not ok or typeof(state) ~= "table" then
+			return
+		end
+		if state.Scores then
+			self:_updateTeamScores(state.Scores)
+		end
+		self._crownSnapshot.StateName = state.StateName or "Inactive"
+		self._crownSnapshot.CarrierName = state.CarrierName
+		if state.StateName == "Carried" and state.CarrierName then
+			-- teamIndex unknown from snapshot; banner will refresh on next CrownPickedUp signal
+			self:_updateCrownCarrier(state.CarrierName, state.CarrierIsPlayer, nil)
+		else
+			self:_updateCrownCarrier(nil)
+		end
+	end)
+
+	-- Worm King: score chip updates
+	self._trove:Add(self._crownService.ScoreUpdate:Connect(function(snapshot: { { TeamIndex: number, Score: number } })
+		self:_updateTeamScores(snapshot)
+	end))
+
+	-- Worm King: Crown pickup/drop/return → carrier banner
+	self._trove:Add(
+		self._crownService.CrownPickedUp:Connect(function(carrierName: string, isPlayer: boolean, teamIndex: number)
+			self._crownSnapshot.StateName = "Carried"
+			self._crownSnapshot.CarrierName = carrierName
+			self:_updateCrownCarrier(carrierName, isPlayer, teamIndex)
+		end)
+	)
+
+	self._trove:Add(self._crownService.CrownDropped:Connect(function(_position: Vector3)
+		self._crownSnapshot.StateName = "Dropped"
+		self._crownSnapshot.CarrierName = nil
+		self:_updateCrownCarrier(nil)
+	end))
+
+	self._trove:Add(self._crownService.CrownReturned:Connect(function(_position: Vector3)
+		self._crownSnapshot.StateName = "Dropped"
+		self._crownSnapshot.CarrierName = nil
+		self:_updateCrownCarrier(nil)
+	end))
+
+	self._trove:Add(self._crownService.CrownSpawned:Connect(function(_position: Vector3)
+		self._crownSnapshot.StateName = "Dropped"
+		self._crownSnapshot.CarrierName = nil
+		self:_updateCrownCarrier(nil)
+	end))
+
+	-- Crown position: the Crown Part's CFrame auto-replicates at 10Hz from the server,
+	-- so the minimap reads `workspace.Crown.PrimaryPart.Position` directly inside
+	-- `_updateMinimap` instead of maintaining a separate signal.
+
+	-- Worm King: a team won → end-of-round handled server-side; banner clears via RoundEnded
+	self._trove:Add(self._crownService.TeamWon:Connect(function(_teamIndex: number, _teamName: string?, _teamColor: any)
+		self:_updateCrownCarrier(nil)
+	end))
+
+	-- Worm King: Marks currency — seed + wire changes
+	task.spawn(function()
+		local ok, marks = self._marksService:GetMarks():await()
+		if ok and type(marks) == "number" then
+			self:_updateMarksUI(marks)
+		end
+	end)
+
+	self._trove:Add(self._marksService.MarksChanged:Connect(function(newMarks: number)
+		self:_updateMarksUI(newMarks)
+	end))
+
+	-- Respawn button click → ask server
+	if self._respawnBtn then
+		self._respawnBtn.Activated:Connect(function()
+			self._marksService.RequestRespawn:Fire()
+		end)
+	end
+
+	-- Respawn result feedback
+	self._trove:Add(self._marksService.RespawnResult:Connect(function(ok: boolean, reason: string?)
+		if ok then
+			self:_showRespawnStatus("Respawning…", false)
+			self:_setGhostHudVisible(false)
+		else
+			local msg = "Respawn failed"
+			if reason == "NoMarks" then
+				msg = string.format("Need %d Marks", WormConfig.WormKing.RespawnCost)
+			elseif reason == "Locked" then
+				msg = "Respawn locked (final 90s)"
+			elseif reason == "NotGhost" then
+				msg = "Enter ghost mode first"
+			elseif reason == "RoundInactive" then
+				msg = "Round not active"
+			end
+			self:_showRespawnStatus(msg, true)
+		end
+	end))
 
 	-- Wire to WormController signals
 	self._trove:Add(self._wormController.SegmentsChanged:Connect(function(segments: number)
@@ -1510,6 +2246,8 @@ function WormUIController:KnitStart()
 				task.delay(3.0, function()
 					if not self._wormController:IsAlive() and not self._wormController._inGhostMode then
 						self:_showDeathScreen(deathInfo)
+						-- Worm King: reveal ghost HUD (Marks + respawn) alongside death screen
+						self:_setGhostHudVisible(true)
 					end
 				end)
 			end
@@ -1525,6 +2263,8 @@ function WormUIController:KnitStart()
 		if self._riderNotifyLabel then
 			self._riderNotifyLabel.Text = ""
 		end
+		-- Worm King: hide ghost HUD when alive as a worm
+		self:_setGhostHudVisible(false)
 	end))
 
 	-- Power-up signals from WormController
@@ -1597,6 +2337,10 @@ function WormUIController:KnitStart()
 			if self._deathFrame then
 				self._deathFrame.Visible = true
 			end
+		end
+		-- Worm King: Marks HUD stays visible whenever the player is not alive.
+		if not self._wormController:IsAlive() then
+			self:_setGhostHudVisible(true)
 		end
 		if self._ghostToggleBtn then
 			self._ghostToggleBtn.Text = if inGhost then "Exit Ghost Mode" else "Enter Ghost Mode"
@@ -1712,18 +2456,52 @@ function WormUIController:KnitStart()
 	-- Round signals from WormController
 	self._trove:Add(self._wormController.RoundEnded:Connect(function(results: any)
 		self:_showFinalScoreboard(results)
+		self:_setGhostHudVisible(false)
+		self:_hideMatchTimer()
+		-- Worm King: reset triangle overlay so BR rounds get the shrink circle back.
+		self._teamModeActive = false
+		self._sandTideScale = 1.0
 	end))
 
 	self._trove:Add(self._wormController.RoundCountdown:Connect(function(seconds: number)
 		self:_hideFinalScoreboard()
 		self:_hideDeathScreen()
 		self:_showCountdown(seconds)
+		self:_setGhostHudVisible(false)
+		self:_hideMatchTimer()
 	end))
 
 	self._trove:Add(self._wormController.RoundStarted:Connect(function()
 		self:_hideDeathScreen()
 		self:_hideFinalScoreboard()
 		self:_hideCountdown()
+		self:_setGhostHudVisible(false)
+	end))
+
+	-- Worm King: match timer tick (elapsed, remaining, phase). MatchTick only fires in team mode,
+	-- so receiving it is a reliable signal that the active round is Worm King.
+	self._trove:Add(self._roundService.MatchTick:Connect(function(_elapsed: number, remaining: number, phase: string)
+		self._teamModeActive = true
+		self:_updateMatchTimer(remaining, phase)
+	end))
+
+	-- Worm King: sand tide scale — cached for minimap triangle rendering
+	task.spawn(function()
+		local ok, scale = self._sandTideService:GetScale():await()
+		if ok and type(scale) == "number" then
+			self._sandTideScale = scale
+		end
+	end)
+
+	self._trove:Add(self._sandTideService.ScaleUpdate:Connect(function(newScale: number)
+		if type(newScale) == "number" then
+			self._sandTideScale = newScale
+		end
+	end))
+
+	-- Worm King: reuse the zone-warning label for tide alerts (tide rising / accelerating).
+	self._trove:Add(self._sandTideService.TideWarning:Connect(function(message: string)
+		self:_showZoneWarning(message)
 	end))
 
 	-- Coin display: initial value + change signal
@@ -1751,9 +2529,10 @@ function WormUIController:KnitStart()
 		self:_showZoneWarning(msg)
 	end))
 
-	-- Per-frame minimap arrow rotation
+	-- Per-frame minimap arrow rotation + smooth crown carry follow
 	self._trove:Connect(RunService.RenderStepped, function()
 		self:_updateMinimapArrow()
+		self:_updateCrownCarryPosition()
 	end)
 
 	-- Fast minimap updates so enemies track smoothly

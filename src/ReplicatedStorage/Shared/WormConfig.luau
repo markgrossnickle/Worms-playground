@@ -55,18 +55,54 @@ return {
 	RoundScoreboardDuration = 8,
 	RoundCountdownDuration = 10,
 
-	-- Shrink zone (battle royale)
+	-- Shrink zone (legacy BR radial shrink — being replaced by Worm King sand tide)
 	ShrinkStartTime = 60, -- seconds after game start before shrinking begins
 	ShrinkEndTime = 180, -- seconds after game start when zone fully closes
 	ShrinkMinRadius = 40, -- zone stops shrinking at this radius
-	-- Teams
+
+	-- Teams (Worm King: 3 teams, triangular map)
 	TeamModeEnabled = true,
-	TeamSize = 2,
+	TeamSize = 8, -- soft cap per team (load-balanced)
 	TeamColors = {
-		{ Name = "Red", Color = Color3.fromRGB(255, 60, 60) },
-		{ Name = "Blue", Color = Color3.fromRGB(60, 100, 255) },
-		{ Name = "Green", Color = Color3.fromRGB(60, 220, 60) },
-		{ Name = "Yellow", Color = Color3.fromRGB(255, 220, 50) },
+		{ Name = "Red", Color = Color3.fromRGB(224, 32, 64) },
+		{ Name = "Blue", Color = Color3.fromRGB(32, 128, 224) },
+		{ Name = "Green", Color = Color3.fromRGB(48, 192, 64) },
+	},
+
+	-- Worm King match configuration
+	WormKing = {
+		MatchDuration = 480, -- 8 minutes total
+		ScoreThreshold = 100, -- first team to this score wins (win-con 1)
+		CrownScorePerSec = 1, -- points awarded per second of carrying Crown
+		CrownLostResetDelay = 15, -- seconds dropped Crown stays on ground before teleporting back
+		CrownSpawnHeight = 4, -- Y offset above terrain for Crown spawn
+
+		-- Sand tide (map contraction) timing
+		SandTideStart = 240, -- T+4:00 contraction begins
+		SandTideFastPhase = 360, -- T+6:00 fast contraction
+		SandTideEnd = 480, -- T+8:00 max contraction
+		SandTideMinScale = 0.20, -- triangle contracts to 20% of original size at end
+		SandTideDamagePerSec = 5, -- HP/s taken outside the safe triangle
+		SandTideRiseRate = 4, -- studs/sec the sand rises outside the triangle
+
+		-- Respawn lockdown (win-con 2 "Elimination" window)
+		RespawnLockoutStart = 390, -- T+6:30 — no more Marks respawns after this
+
+		-- Marks economy (ghost earns; respawns as worm)
+		RespawnCost = 10,
+		Marks = {
+			AssistEnemy = 1,
+			KillEnemy = 3,
+			AssistCarrier = 2,
+			KillCarrier = 5,
+		},
+
+		-- Team base layout (equilateral triangle inscribed in arena)
+		BaseSafeRadius = 60, -- studs of invulnerable base safe zone (stays fixed through shrink)
+		BaseFlattenRadius = 60, -- studs of terrain flattening around each base
+		BaseSpawnRingRadius = 20, -- spawn points arranged in a ring of this radius
+		BaseSpawnCount = 8, -- number of spawn points per base
+		SpawnProtectionDuration = 2, -- seconds of invulnerability after spawn
 	},
 
 	-- Ghost mode
