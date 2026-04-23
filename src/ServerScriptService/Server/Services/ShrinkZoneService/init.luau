@@ -7,12 +7,17 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 
-local TeamService -- resolved in KnitStart
-
 local HALF_ARENA = WormConfig.ArenaSize / 2
 local RING_SEGMENTS = 64
 local RING_HEIGHT = 15
 local CLIENT_UPDATE_INTERVAL = 0.5 -- Send zone updates to clients at 2Hz
+
+-- Worm King mode uses the SandTide triangle as the shrinking boundary, so the
+-- circular ring must not appear at all (otherwise players see a red ring
+-- outside the yellow triangle edges and can spawn outside the visible wall).
+-- Decided at module load from WormConfig.TeamModeEnabled so the ring is never
+-- built in team mode — KnitInit/KnitStart can't race with RoundService:Reset.
+local DISABLED = WormConfig.TeamModeEnabled == true
 
 local ShrinkZoneService = Knit.CreateService({
 	Name = "ShrinkZoneService",
@@ -28,15 +33,7 @@ local ShrinkZoneService = Knit.CreateService({
 	_warnedStart = false,
 	_warned30s = false,
 	_lastClientUpdate = 0,
-	_disabled = false, -- set true in Worm King (team) mode — triangle replaces the circle
 })
-
--- Worm King mode uses the SandTide triangle as the shrinking boundary; the
--- circular ring would just fight with it and let worms spawn outside the
--- visible wall. All state / visuals are gated off when `_disabled` is true.
-local function isTeamMode(): boolean
-	return TeamService ~= nil and TeamService:IsEnabled()
-end
 
 --------------------------------------------------
 -- Ring visual
@@ -89,7 +86,7 @@ end
 --------------------------------------------------
 
 function ShrinkZoneService:GetCurrentRadius(): number
-	if self._disabled then
+	if DISABLED then
 		return HALF_ARENA
 	end
 	return self._currentRadius
@@ -100,7 +97,7 @@ function ShrinkZoneService:GetElapsedTime(): number
 end
 
 function ShrinkZoneService:IsOutsideZone(position: Vector3): boolean
-	if self._disabled then
+	if DISABLED then
 		return false
 	end
 	local dist = Vector3.new(position.X, 0, position.Z).Magnitude
@@ -108,9 +105,6 @@ function ShrinkZoneService:IsOutsideZone(position: Vector3): boolean
 end
 
 function ShrinkZoneService:_update()
-	if self._disabled then
-		return
-	end
 	local elapsed = self:GetElapsedTime()
 	local now = os.clock()
 
@@ -156,23 +150,11 @@ function ShrinkZoneService:Reset()
 	self._warnedStart = false
 	self._warned30s = false
 	self._lastClientUpdate = 0
-	if self._disabled then
-		-- Ensure the ring is hidden in case this mode was toggled at runtime.
-		for _, part in self._ringParts do
-			part.Transparency = 1
-		end
+	if DISABLED then
+		-- In Worm King mode the ring was never built; nothing to reposition.
 		return
 	end
 	self:_updateRingVisual()
-end
-
--- Hide the circular ring entirely (ring parts become invisible, damage gates
--- off). Called once in KnitStart when TeamService:IsEnabled().
-function ShrinkZoneService:_disable()
-	self._disabled = true
-	for _, part in self._ringParts do
-		part.Transparency = 1
-	end
 end
 
 --------------------------------------------------
@@ -180,16 +162,19 @@ end
 --------------------------------------------------
 
 function ShrinkZoneService:KnitInit()
+	-- In Worm King (team) mode the SandTide triangle is the boundary, so the
+	-- circular ring is never created — otherwise players see a red ring
+	-- outside the yellow triangle edges.
+	if DISABLED then
+		return
+	end
 	self:_createRing()
 end
 
 function ShrinkZoneService:KnitStart()
-	TeamService = require(script.Parent.TeamService)
-
 	self._gameStartTime = os.clock()
 
-	if isTeamMode() then
-		self:_disable()
+	if DISABLED then
 		return
 	end
 
