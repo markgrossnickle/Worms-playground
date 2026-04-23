@@ -204,121 +204,125 @@ function WormService:_createArena()
 		end
 	end
 
-	-- Boundary walls — animated energy barrier (tall enough to cover terrain height)
-	local wallHeight = 40
-	local wallThickness = 4
-	local wallY = 15
-	local wallData = {
-		{
-			Vector3.new(WormConfig.ArenaSize + wallThickness * 2, wallHeight, wallThickness),
-			Vector3.new(0, wallY, HALF_ARENA),
-		},
-		{
-			Vector3.new(WormConfig.ArenaSize + wallThickness * 2, wallHeight, wallThickness),
-			Vector3.new(0, wallY, -HALF_ARENA),
-		},
-		{
-			Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize + wallThickness * 2),
-			Vector3.new(HALF_ARENA, wallY, 0),
-		},
-		{
-			Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize + wallThickness * 2),
-			Vector3.new(-HALF_ARENA, wallY, 0),
-		},
-	}
+	-- Boundary walls — animated energy barrier (tall enough to cover terrain height).
+	-- In Worm King mode the SandTide triangle IS the physical boundary, so skip the
+	-- square walls entirely — otherwise players see a square around the triangle.
+	if not WormConfig.TeamModeEnabled then
+		local wallHeight = 40
+		local wallThickness = 4
+		local wallY = 15
+		local wallData = {
+			{
+				Vector3.new(WormConfig.ArenaSize + wallThickness * 2, wallHeight, wallThickness),
+				Vector3.new(0, wallY, HALF_ARENA),
+			},
+			{
+				Vector3.new(WormConfig.ArenaSize + wallThickness * 2, wallHeight, wallThickness),
+				Vector3.new(0, wallY, -HALF_ARENA),
+			},
+			{
+				Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize + wallThickness * 2),
+				Vector3.new(HALF_ARENA, wallY, 0),
+			},
+			{
+				Vector3.new(wallThickness, wallHeight, WormConfig.ArenaSize + wallThickness * 2),
+				Vector3.new(-HALF_ARENA, wallY, 0),
+			},
+		}
 
-	local wallsFolder = Instance.new("Folder")
-	wallsFolder.Name = "BoundaryWalls"
-	wallsFolder.Parent = workspace
+		local wallsFolder = Instance.new("Folder")
+		wallsFolder.Name = "BoundaryWalls"
+		wallsFolder.Parent = workspace
 
-	local animatedWallParts: { Part } = {}
+		local animatedWallParts: { Part } = {}
 
-	for i, data in wallData do
-		-- Main force-field body — keep CanCollide=true so ghosts can't leave the arena
-		local wall = Instance.new("Part")
-		wall.Name = "Wall" .. i
-		wall.Size = data[1]
-		wall.Position = data[2]
-		wall.Anchored = true
-		wall.CanQuery = false -- don't block weapon raycasts
-		wall.CanCollide = true
-		wall.Material = Enum.Material.ForceField
-		wall.Color = Color3.fromRGB(255, 40, 40)
-		wall.Transparency = 0.2
-		wall.Parent = wallsFolder
-		table.insert(animatedWallParts, wall)
+		for i, data in wallData do
+			-- Main force-field body — keep CanCollide=true so ghosts can't leave the arena
+			local wall = Instance.new("Part")
+			wall.Name = "Wall" .. i
+			wall.Size = data[1]
+			wall.Position = data[2]
+			wall.Anchored = true
+			wall.CanQuery = false -- don't block weapon raycasts
+			wall.CanCollide = true
+			wall.Material = Enum.Material.ForceField
+			wall.Color = Color3.fromRGB(255, 40, 40)
+			wall.Transparency = 0.2
+			wall.Parent = wallsFolder
+			table.insert(animatedWallParts, wall)
 
-		-- Glowing capstone along the top
-		local size = data[1]
-		local pos = data[2]
-		local topCap = Instance.new("Part")
-		topCap.Name = "WallCapTop" .. i
-		topCap.Size = Vector3.new(size.X, 0.6, size.Z)
-		topCap.Position = Vector3.new(pos.X, pos.Y + wallHeight / 2, pos.Z)
-		topCap.Anchored = true
-		topCap.CanQuery = false
-		topCap.CanCollide = false
-		topCap.Material = Enum.Material.Neon
-		topCap.Color = Color3.fromRGB(255, 30, 30)
-		topCap.Parent = wallsFolder
-		table.insert(animatedWallParts, topCap)
+			-- Glowing capstone along the top
+			local size = data[1]
+			local pos = data[2]
+			local topCap = Instance.new("Part")
+			topCap.Name = "WallCapTop" .. i
+			topCap.Size = Vector3.new(size.X, 0.6, size.Z)
+			topCap.Position = Vector3.new(pos.X, pos.Y + wallHeight / 2, pos.Z)
+			topCap.Anchored = true
+			topCap.CanQuery = false
+			topCap.CanCollide = false
+			topCap.Material = Enum.Material.Neon
+			topCap.Color = Color3.fromRGB(255, 30, 30)
+			topCap.Parent = wallsFolder
+			table.insert(animatedWallParts, topCap)
 
-		-- Glowing capstone along the bottom
-		local bottomCap = Instance.new("Part")
-		bottomCap.Name = "WallCapBot" .. i
-		bottomCap.Size = Vector3.new(size.X, 0.6, size.Z)
-		bottomCap.Position = Vector3.new(pos.X, 0.3, pos.Z)
-		bottomCap.Anchored = true
-		bottomCap.CanQuery = false
-		bottomCap.CanCollide = false
-		bottomCap.Material = Enum.Material.Neon
-		bottomCap.Color = Color3.fromRGB(255, 30, 30)
-		bottomCap.Parent = wallsFolder
-		table.insert(animatedWallParts, bottomCap)
+			-- Glowing capstone along the bottom
+			local bottomCap = Instance.new("Part")
+			bottomCap.Name = "WallCapBot" .. i
+			bottomCap.Size = Vector3.new(size.X, 0.6, size.Z)
+			bottomCap.Position = Vector3.new(pos.X, 0.3, pos.Z)
+			bottomCap.Anchored = true
+			bottomCap.CanQuery = false
+			bottomCap.CanCollide = false
+			bottomCap.Material = Enum.Material.Neon
+			bottomCap.Color = Color3.fromRGB(255, 30, 30)
+			bottomCap.Parent = wallsFolder
+			table.insert(animatedWallParts, bottomCap)
 
-		-- Point lights every ~80 studs along the wall for a patrol-light effect
-		local longAxis = math.max(size.X, size.Z)
-		local numLights = math.max(4, math.floor(longAxis / 80))
-		for j = 1, numLights do
-			local t = (j - 0.5) / numLights - 0.5 -- -0.5 .. 0.5
-			local lightPos: Vector3
-			if size.X > size.Z then
-				lightPos = Vector3.new(pos.X + size.X * t, wallHeight + 1, pos.Z)
-			else
-				lightPos = Vector3.new(pos.X, wallHeight + 1, pos.Z + size.Z * t)
+			-- Point lights every ~80 studs along the wall for a patrol-light effect
+			local longAxis = math.max(size.X, size.Z)
+			local numLights = math.max(4, math.floor(longAxis / 80))
+			for j = 1, numLights do
+				local t = (j - 0.5) / numLights - 0.5 -- -0.5 .. 0.5
+				local lightPos: Vector3
+				if size.X > size.Z then
+					lightPos = Vector3.new(pos.X + size.X * t, wallHeight + 1, pos.Z)
+				else
+					lightPos = Vector3.new(pos.X, wallHeight + 1, pos.Z + size.Z * t)
+				end
+				local lightAnchor = Instance.new("Part")
+				lightAnchor.Name = "WallLight" .. i .. "_" .. j
+				lightAnchor.Size = Vector3.new(1.5, 1.5, 1.5)
+				lightAnchor.Shape = Enum.PartType.Ball
+				lightAnchor.Position = lightPos
+				lightAnchor.Anchored = true
+				lightAnchor.CanCollide = false
+				lightAnchor.CanQuery = false
+				lightAnchor.Material = Enum.Material.Neon
+				lightAnchor.Color = Color3.fromRGB(255, 60, 60)
+				lightAnchor.Parent = wallsFolder
+
+				local pointLight = Instance.new("PointLight")
+				pointLight.Color = Color3.fromRGB(255, 80, 80)
+				pointLight.Brightness = 3
+				pointLight.Range = 30
+				pointLight.Parent = lightAnchor
 			end
-			local lightAnchor = Instance.new("Part")
-			lightAnchor.Name = "WallLight" .. i .. "_" .. j
-			lightAnchor.Size = Vector3.new(1.5, 1.5, 1.5)
-			lightAnchor.Shape = Enum.PartType.Ball
-			lightAnchor.Position = lightPos
-			lightAnchor.Anchored = true
-			lightAnchor.CanCollide = false
-			lightAnchor.CanQuery = false
-			lightAnchor.Material = Enum.Material.Neon
-			lightAnchor.Color = Color3.fromRGB(255, 60, 60)
-			lightAnchor.Parent = wallsFolder
-
-			local pointLight = Instance.new("PointLight")
-			pointLight.Color = Color3.fromRGB(255, 80, 80)
-			pointLight.Brightness = 3
-			pointLight.Range = 30
-			pointLight.Parent = lightAnchor
 		end
+
+		-- Pulse the walls between two red shades on Heartbeat for an energy-barrier feel
+		RunService.Heartbeat:Connect(function()
+			local t = os.clock()
+			local pulse = (math.sin(t * 2.5) + 1) * 0.5 -- 0..1
+			local r = 180 + pulse * 75
+			local g = 20 + pulse * 40
+			local b = 20 + pulse * 40
+			local pulsedColor = Color3.fromRGB(r, g, b)
+			for _, part in animatedWallParts do
+				part.Color = pulsedColor
+			end
+		end)
 	end
-
-	-- Pulse the walls between two red shades on Heartbeat for an energy-barrier feel
-	RunService.Heartbeat:Connect(function()
-		local t = os.clock()
-		local pulse = (math.sin(t * 2.5) + 1) * 0.5 -- 0..1
-		local r = 180 + pulse * 75
-		local g = 20 + pulse * 40
-		local b = 20 + pulse * 40
-		local pulsedColor = Color3.fromRGB(r, g, b)
-		for _, part in animatedWallParts do
-			part.Color = pulsedColor
-		end
-	end)
 
 	-- Configure desert lighting
 	local Lighting = game:GetService("Lighting")

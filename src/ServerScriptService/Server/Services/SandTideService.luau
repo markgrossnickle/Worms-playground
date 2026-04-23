@@ -34,9 +34,11 @@ local RoundService -- set in KnitStart
 local CLIENT_UPDATE_INTERVAL = 0.5 -- broadcast scale to clients at 2Hz
 local DAMAGE_TICK_INTERVAL = 1.0 -- apply tide damage at 1Hz
 
--- Triangle edge visual tuning
-local EDGE_HEIGHT = 18 -- studs tall — clearly visible from worm height
-local EDGE_THICKNESS = 2 -- studs — thick enough to read as a wall, thin enough not to block aim
+-- Triangle edge tuning — the edges ARE the physical arena boundary in Worm King
+-- mode (CanCollide=true), replacing the old square walls. Height matches the old
+-- walls so ghosts can't hop out; thickness bumped for reliable collision.
+local EDGE_HEIGHT = 40 -- studs tall — matches old square boundary walls
+local EDGE_THICKNESS = 4 -- studs — thick enough for reliable physical collision
 local EDGE_COLOR = Color3.fromRGB(255, 180, 80) -- sandy orange
 local EDGE_TRANSPARENCY = 0.35
 
@@ -85,11 +87,13 @@ function SandTideService:GetScale(): number
 end
 
 --------------------------------------------------
--- 3D triangle edge visual
+-- 3D triangle edge walls
 --
 -- Three glowing wall segments trace the inscribed equilateral triangle. They
--- ride the sand-tide scale so players can see the boundary contract in real
--- time. Created once in KnitStart, repositioned every time the scale changes
+-- ride the sand-tide scale so players can see (and physically feel) the
+-- boundary contract in real time. In Worm King mode these ARE the arena
+-- boundary — the old square BoundaryWalls are skipped in WormService.
+-- Created once in KnitStart, repositioned every time the scale changes
 -- (throttled to 2Hz so we aren't writing CFrame every heartbeat).
 --------------------------------------------------
 
@@ -103,7 +107,9 @@ function SandTideService:_createEdges()
 		local part = Instance.new("Part")
 		part.Name = "TriEdge" .. i
 		part.Anchored = true
-		part.CanCollide = false
+		-- Physical boundary: worms and ghosts collide with the triangle edges.
+		-- CanQuery stays false so weapon raycasts pass through the wall.
+		part.CanCollide = true
 		part.CanQuery = false
 		part.CastShadow = false
 		part.Material = Enum.Material.Neon
