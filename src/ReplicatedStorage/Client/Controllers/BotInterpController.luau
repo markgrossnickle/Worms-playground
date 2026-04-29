@@ -165,13 +165,39 @@ function BotInterpController:KnitStart()
 	-- frame is applied, so reads of part.CFrame here see the latest value
 	-- the server pushed.
 	--
-	-- Iteration safety: we collect dead keys into `toRemove` rather than
+	-- Performance: we use `workspace:BulkMoveTo` instead of writing
+	-- `part.CFrame = ...` individually. With ~24 bots × ~30 parts each,
+	-- per-Part writes produce ~43,000 CFrame writes/sec at 60fps and each
+	-- one fires property-changed events. BulkMoveTo is a single C++ batched
+	-- call that takes parallel `parts` + `cframes` arrays and (with
+	-- FireCFrameChanged) only fires CFrame events, skipping Position and
+	-- Rotation. This was the dominant client-side hot spot per script
+	-- profiler.
+	--
+	-- We also skip parts that are already at target (no observable lerp
+	-- progress), so stationary or fully-converged bots cost ~zero per frame.
+	--
+	-- Iteration safety: dead keys are collected into `toRemove` rather than
 	-- assigning nil to `self._parts[part]` mid-loop. Lua's generic-for over
 	-- a table has undefined behavior when a key is set to nil during
 	-- traversal — entries can be skipped or visited twice.
 	local toRemove: { BasePart } = {}
+	local partsBuf: { BasePart } = {}
+	local cframesBuf: { CFrame } = {}
+	-- Anything below this delta from target is treated as "already there"
+	-- and skipped. 0.01 stud / ~0.01 deg is well below per-pixel visibility.
+	local CONVERGED_EPSILON = 0.01
+
 	RunService.RenderStepped:Connect(function(dt: number)
 		local alpha = math.min(1, dt * SMOOTH_RATE)
+
+		-- Reusable scratch buffers — clear and refill each frame. table.clear
+		-- keeps the backing array allocated, so subsequent table.insert
+		-- doesn't allocate. This is the standard Lua pattern for per-frame
+		-- staging buffers.
+		table.clear(partsBuf)
+		table.clear(cframesBuf)
+
 		for part, state in self._parts do
 			if not part.Parent then
 				table.insert(toRemove, part)
@@ -195,11 +221,25 @@ function BotInterpController:KnitStart()
 				state.target = replicated
 			end
 
-			-- Lerp displayed → target by alpha, then write.
+			-- Skip stationary / converged parts entirely — no lerp, no write.
+			if state.displayed:FuzzyEq(state.target, CONVERGED_EPSILON) then
+				continue
+			end
+
+			-- Lerp displayed → target by alpha. Queue for batched write.
 			local newDisplayed = state.displayed:Lerp(state.target, alpha)
-			part.CFrame = newDisplayed
 			state.displayed = newDisplayed
 			state.lastWrite = newDisplayed
+			table.insert(partsBuf, part)
+			table.insert(cframesBuf, newDisplayed)
+		end
+
+		-- Batched CFrame write. FireCFrameChanged fires only the CFrame
+		-- property changed signal (skipping Position / Rotation events) —
+		-- C++ batched, much cheaper than per-Part assignment. This was the
+		-- dominant client-side hot spot per script profiler before batching.
+		if #partsBuf > 0 then
+			workspace:BulkMoveTo(partsBuf, cframesBuf, Enum.BulkMoveMode.FireCFrameChanged)
 		end
 
 		if #toRemove > 0 then

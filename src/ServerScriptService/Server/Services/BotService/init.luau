@@ -32,11 +32,15 @@ local FOOD_SEEK_RANGE = 50
 local POWERUP_SEEK_RANGE = 35
 local FLEE_RANGE = 28
 local CHASE_RANGE = 45
--- Worm King: how close a bot must be before it pursues a dropped Crown,
--- and how aggressively it chases the enemy carrier. Larger than CHASE_RANGE
--- because the Crown is a global objective worth a real detour.
-local CROWN_PICKUP_RANGE = 120
-local CROWN_CARRIER_CHASE_RANGE = 100
+-- Worm King: dropped-Crown pickup range. A real detour radius — bots will
+-- abandon other tasks to grab a free crown.
+local CROWN_PICKUP_RANGE = 200
+-- Enemy-carrier chase range: covers the entire arena. The crown is a
+-- global objective; if anyone on the enemy team is carrying it, every bot
+-- on our team should converge regardless of distance. (Previously 100,
+-- which only triggered when the carrier left their base — they could just
+-- circle their corner and bots never engaged.)
+local CROWN_CARRIER_CHASE_RANGE = 9999
 local DIRECTION_CHANGE_MIN = 1
 local DIRECTION_CHANGE_MAX = 3
 local BOOST_CHANCE = 0.1
@@ -126,20 +130,25 @@ type BotData = {
 	SegmentPositions: { [number]: Vector3 },
 }
 
--- Bot ghost: NPC version of a player ghost. Spawns when a bot worm dies so
--- there's visible activity outside the alive-worm population. Uses a
--- standard Roblox Humanoid + MoveTo for pathfinding (rather than the
--- anchored-CFrame approach the worm uses) so the ghost reads as walking
--- around like a normal NPC.
+-- Bot ghost: NPC version of a player ghost. Spawns when a bot worm dies
+-- so there's visible activity outside the alive-worm population.
+--
+-- Movement: anchored HRP + manual CFrame updates (no Humanoid simulation).
+-- We tried unanchored Humanoid + MoveTo first, but the minimal R6 rig
+-- (no arms/legs) doesn't give the Humanoid enough info to balance —
+-- the model would tip over and slide. Anchored + manual is reliable and
+-- matches the approach the worm head uses.
 type BotGhostData = {
 	Name: string,
 	Model: Model,
-	Humanoid: Humanoid,
 	HRP: BasePart,
 	Color: Color3,
 	TeamIndex: number, -- 0 if no team (solo / FFA)
 	State: string,
-	NextWanderTarget: number,
+	-- Manual movement: store target world position; advance HRP toward it
+	-- at WalkSpeed each tick. When close, pick a new target.
+	MoveTarget: Vector3,
+	NextWanderPick: number,
 	DespawnAt: number,
 }
 
@@ -568,10 +577,11 @@ end
 -- Bot ghosts (NPC ghost AI)
 --------------------------------------------------
 
--- Build a minimal humanoid ghost model. Same visual language as the
--- WormService fallback ghost: small neon ball head + box torso, glow
--- light, transparency from WormConfig.Ghost.
-function BotService:_buildBotGhostModel(name: string, color: Color3): (Model, Humanoid, BasePart)
+-- Build a minimal anchored ghost model — no Humanoid (we drive movement
+-- manually). Visible head (neon ball) + torso block, point light, wisp
+-- particles, name billboard. HRP is invisible and acts as the assembly
+-- anchor; we Pivot the model around it.
+function BotService:_buildBotGhostModel(name: string, color: Color3): (Model, BasePart)
 	local ghostConfig = WormConfig.Ghost
 	local model = Instance.new("Model")
 	model.Name = name
@@ -579,65 +589,57 @@ function BotService:_buildBotGhostModel(name: string, color: Color3): (Model, Hu
 	model:SetAttribute("IsBotGhost", true)
 	model:SetAttribute("GhostOwner", name)
 
+	-- Hidden anchor part. Acts as the model's PrimaryPart so PivotTo lands
+	-- the rest of the rig at the right place. All visible parts are
+	-- positioned at local offsets relative to the HRP at origin; PivotTo
+	-- preserves those relative offsets when moving the assembly.
 	local hrp = Instance.new("Part")
 	hrp.Name = "HumanoidRootPart"
-	hrp.Size = Vector3.new(2, 2, 1)
+	hrp.Size = Vector3.new(1.4, 2, 1)
+	hrp.CFrame = CFrame.new(0, 0, 0)
 	hrp.Transparency = 1
-	hrp.CanCollide = true
-	hrp.Material = Enum.Material.Neon
-	hrp.Color = color
+	hrp.Anchored = true
+	hrp.CanCollide = false
+	hrp.CanQuery = false
+	hrp.CastShadow = false
 	hrp.Parent = model
 	model.PrimaryPart = hrp
 
-	local humanoid = Instance.new("Humanoid")
-	humanoid.WalkSpeed = ghostConfig.WalkSpeed * 0.7
-	humanoid.JumpPower = ghostConfig.JumpPower
-	humanoid.MaxHealth = math.huge
-	humanoid.Health = math.huge
-	-- BreakJointsOnDeath off so the ghost doesn't ragdoll if its model is
-	-- transiently mis-jointed during construction.
-	humanoid.BreakJointsOnDeath = false
-	humanoid.Parent = model
-
-	-- Head — a small bright neon ball, the most visible part from any angle.
-	local head = Instance.new("Part")
-	head.Name = "Head"
-	head.Shape = Enum.PartType.Ball
-	head.Size = Vector3.new(1.4, 1.4, 1.4)
-	head.Color = color
-	head.Material = Enum.Material.Neon
-	head.Transparency = ghostConfig.Transparency
-	head.CanCollide = false
-	head.Massless = true
-	head.Parent = model
-
-	local headWeld = Instance.new("Weld")
-	headWeld.Part0 = hrp
-	headWeld.Part1 = head
-	headWeld.C0 = CFrame.new(0, 1.2, 0)
-	headWeld.Parent = head
-
-	-- Torso block underneath the head so the ghost has a body silhouette.
+	-- Torso block centered at HRP (HRP is invisible, so no z-fighting).
 	local torso = Instance.new("Part")
 	torso.Name = "Torso"
-	torso.Size = Vector3.new(1.4, 1.6, 0.8)
+	torso.Size = Vector3.new(1.5, 1.8, 0.8)
+	torso.CFrame = CFrame.new(0, 0, 0)
 	torso.Color = color
 	torso.Material = Enum.Material.Neon
 	torso.Transparency = ghostConfig.Transparency
+	torso.Anchored = true
 	torso.CanCollide = false
-	torso.Massless = true
+	torso.CanQuery = false
+	torso.CastShadow = false
 	torso.Parent = model
 
-	local torsoWeld = Instance.new("Weld")
-	torsoWeld.Part0 = hrp
-	torsoWeld.Part1 = torso
-	torsoWeld.C0 = CFrame.new(0, 0, 0)
-	torsoWeld.Parent = torso
+	-- Head ball, positioned 1.7 studs above HRP center (top of torso + half
+	-- head height). Local Y stays world-up under yaw rotation, so this
+	-- stays at the right height regardless of facing direction.
+	local head = Instance.new("Part")
+	head.Name = "Head"
+	head.Shape = Enum.PartType.Ball
+	head.Size = Vector3.new(1.6, 1.6, 1.6)
+	head.CFrame = CFrame.new(0, 1.7, 0)
+	head.Color = color
+	head.Material = Enum.Material.Neon
+	head.Transparency = ghostConfig.Transparency
+	head.Anchored = true
+	head.CanCollide = false
+	head.CanQuery = false
+	head.CastShadow = false
+	head.Parent = model
 
-	-- Glow light on head
+	-- Glow light on head (visible from far away, even in shadow)
 	local light = Instance.new("PointLight")
-	light.Brightness = ghostConfig.GlowBrightness
-	light.Range = ghostConfig.GlowRange
+	light.Brightness = ghostConfig.GlowBrightness * 1.4
+	light.Range = ghostConfig.GlowRange + 4
 	light.Color = color
 	light.Parent = head
 
@@ -650,20 +652,20 @@ function BotService:_buildBotGhostModel(name: string, color: Color3): (Model, Hu
 		NumberSequenceKeypoint.new(1, 1),
 	})
 	emitter.Size = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.5),
+		NumberSequenceKeypoint.new(0, 0.6),
 		NumberSequenceKeypoint.new(1, 0),
 	})
 	emitter.Lifetime = NumberRange.new(0.5, 1.2)
-	emitter.Rate = 12
+	emitter.Rate = 16
 	emitter.Speed = NumberRange.new(1, 3)
 	emitter.SpreadAngle = Vector2.new(180, 180)
 	emitter.LightEmission = 1
 	emitter.LightInfluence = 0
-	emitter.Parent = hrp
+	emitter.Parent = head
 
 	-- Name label
 	local billboard = Instance.new("BillboardGui")
-	billboard.Size = UDim2.fromOffset(110, 22)
+	billboard.Size = UDim2.fromOffset(120, 24)
 	billboard.StudsOffset = Vector3.new(0, 2.4, 0)
 	billboard.AlwaysOnTop = true
 	billboard.LightInfluence = 0
@@ -680,7 +682,7 @@ function BotService:_buildBotGhostModel(name: string, color: Color3): (Model, Hu
 	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 	label.Parent = billboard
 
-	return model, humanoid, hrp
+	return model, hrp
 end
 
 -- Spawn an NPC ghost for a dead bot. They wander around the arena and can
@@ -704,34 +706,42 @@ function BotService:_spawnBotGhost(name: string, deathPos: Vector3, color: Color
 		end
 	end
 
-	local model, humanoid, hrp = self:_buildBotGhostModel(name, ghostColor)
+	local model, hrp = self:_buildBotGhostModel(name, ghostColor)
 
-	-- Position a couple studs above ground so the humanoid lands cleanly.
+	-- Anchored manual movement: position the rig around the death point,
+	-- ~3 studs off the ground so it doesn't clip terrain.
 	local spawnY = TerrainHeight.getSurfaceY(deathPos.X, deathPos.Z) + 3
-	hrp.CFrame = CFrame.new(deathPos.X, spawnY, deathPos.Z)
+	model:PivotTo(CFrame.new(deathPos.X, spawnY, deathPos.Z))
 	model.Parent = workspace
 
-	-- CRITICAL: pin physics authority to the server. With Humanoid +
-	-- unanchored, Roblox's default behavior is to assign network ownership
-	-- to the nearest player every frame, which then competes with the
-	-- server's `Humanoid:MoveTo` and gives that client a trivial speedhack
-	-- vector. Calling `SetNetworkOwner(nil)` on the assembly root forces
-	-- server simulation. Must be called AFTER parenting to workspace.
-	pcall(function()
-		hrp:SetNetworkOwner(nil)
-	end)
+	-- Pick an immediate wander target so the ghost starts moving on frame 1.
+	local angle = math.random() * math.pi * 2
+	local target = Vector3.new(deathPos.X + math.cos(angle) * 12, spawnY, deathPos.Z + math.sin(angle) * 12)
 
 	self._botGhosts[name] = {
 		Name = name,
 		Model = model,
-		Humanoid = humanoid,
 		HRP = hrp,
 		Color = ghostColor,
 		TeamIndex = teamIndex,
 		State = "Alive",
-		NextWanderTarget = 0, -- forces a wander on the first AI tick
+		MoveTarget = target,
+		NextWanderPick = os.clock() + 1.5 + math.random() * 1.5,
 		DespawnAt = os.clock() + BOT_GHOST_LIFETIME,
 	}
+
+	print(
+		string.format(
+			"[bot-ghost] spawned %s at (%.0f, %.0f) team=%d color=(%d,%d,%d)",
+			name,
+			deathPos.X,
+			deathPos.Z,
+			teamIndex,
+			math.floor(ghostColor.R * 255),
+			math.floor(ghostColor.G * 255),
+			math.floor(ghostColor.B * 255)
+		)
+	)
 end
 
 function BotService:_despawnBotGhost(name: string)
@@ -751,10 +761,14 @@ function BotService:_despawnAllBotGhosts()
 	end
 end
 
--- Per-tick AI: wander to a random offset every few seconds. If a worm is
--- close, pursue it (visual menace — actual eating is handled by
--- _checkBotGhostEaten so the ghost just walks until eaten or timed out).
-function BotService:_updateBotGhostAI(data: BotGhostData, now: number)
+-- Walking speed of bot ghosts (studs/sec). 70% of player ghost walk speed.
+local BOT_GHOST_WALK_SPEED = WormConfig.Ghost.WalkSpeed * 0.7
+
+-- Per-tick AI: pick a wander target every few seconds (or pursue the
+-- closest enemy worm if one is within 40 studs), and advance the model
+-- toward MoveTarget at BOT_GHOST_WALK_SPEED * dt. Anchored manual movement
+-- — no Humanoid simulation, no balance issues, server-authoritative.
+function BotService:_updateBotGhostAI(data: BotGhostData, now: number, dt: number)
 	if data.State ~= "Alive" then
 		return
 	end
@@ -771,12 +785,11 @@ function BotService:_updateBotGhostAI(data: BotGhostData, now: number)
 		return
 	end
 
-	-- Pursue nearby worms occasionally. Picks the closest enemy worm
-	-- (player or bot) within 35 studs. If found, walk toward it. Falls
-	-- back to wander when no target.
 	local pos = data.HRP.Position
+
+	-- Pursue: closest enemy worm within 40 studs (player or bot).
 	local closestEnemyPos: Vector3? = nil
-	local closestDist = 35
+	local closestDist = 40
 
 	for player, wormData in WormService._worms do
 		if wormData.State == "Alive" and wormData.HeadPosition then
@@ -802,29 +815,41 @@ function BotService:_updateBotGhostAI(data: BotGhostData, now: number)
 	end
 
 	if closestEnemyPos then
-		-- Pursuit: walk straight toward the worm. Re-issue MoveTo every
-		-- 0.5s so the path keeps tracking moving targets.
-		if now >= data.NextWanderTarget then
-			data.Humanoid:MoveTo(closestEnemyPos)
-			data.NextWanderTarget = now + 0.5
-		end
-		return
-	end
-
-	-- Wander: pick a new random target every 2-4 seconds.
-	if now >= data.NextWanderTarget then
+		-- Pursuit: re-target every frame to track the moving worm.
+		data.MoveTarget = Vector3.new(closestEnemyPos.X, pos.Y, closestEnemyPos.Z)
+		data.NextWanderPick = now + 0.5 -- delay next random wander pick a bit
+	elseif now >= data.NextWanderPick then
+		-- Wander: pick a new random target every 2-4 seconds.
 		local angle = math.random() * math.pi * 2
-		local dist = math.random() * BOT_GHOST_WANDER_RADIUS + 5
-		local target = pos + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
-		-- Clamp to arena interior so the ghost doesn't pathfind off the map.
+		local distance = math.random() * BOT_GHOST_WANDER_RADIUS + 5
+		local target = pos + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
 		local margin = 30
-		target = Vector3.new(
+		data.MoveTarget = Vector3.new(
 			math.clamp(target.X, -HALF_ARENA + margin, HALF_ARENA - margin),
-			target.Y,
+			pos.Y,
 			math.clamp(target.Z, -HALF_ARENA + margin, HALF_ARENA - margin)
 		)
-		data.Humanoid:MoveTo(target)
-		data.NextWanderTarget = now + 2 + math.random() * 2
+		data.NextWanderPick = now + 2 + math.random() * 2
+	end
+
+	-- Advance toward MoveTarget by WalkSpeed * dt. Cap step at the
+	-- distance remaining so we don't overshoot.
+	local toTarget = data.MoveTarget - pos
+	local toTargetFlat = Vector3.new(toTarget.X, 0, toTarget.Z)
+	local remaining = toTargetFlat.Magnitude
+	if remaining > 0.05 then
+		local step = math.min(BOT_GHOST_WALK_SPEED * dt, remaining)
+		local dir = toTargetFlat.Unit
+		local newX = pos.X + dir.X * step
+		local newZ = pos.Z + dir.Z * step
+		-- Sit on the terrain surface — the ghost should track terrain
+		-- height as it walks (matches the worm's surface-following).
+		local newY = TerrainHeight.getSurfaceY(newX, newZ) + 3
+		-- PivotTo updates HRP + Head + Torso together (all are anchored
+		-- siblings under the model). Face the direction of travel so the
+		-- name billboard reads correctly.
+		local lookCFrame = CFrame.new(Vector3.new(newX, newY, newZ), Vector3.new(newX + dir.X, newY, newZ + dir.Z))
+		data.Model:PivotTo(lookCFrame)
 	end
 end
 
@@ -1099,6 +1124,15 @@ function BotService:_findNearestFood(botPos: Vector3): Vector3?
 end
 
 function BotService:_findNearestWormThreat(botName: string, botPos: Vector3, botSegments: number): (Vector3?, boolean)
+	-- Tunable thresholds: bots flee enemies that are clearly bigger
+	-- (>1.4×) and chase anyone within reach who isn't drastically bigger.
+	-- Previously the chase trigger required `enemy < my_segments * 0.7`,
+	-- which meant in early/mid game (when worms are similar size) bots
+	-- never engaged anyone — combat was rare and the team that grabbed the
+	-- crown could just circle in place.
+	local FLEE_SIZE_RATIO = 1.4
+	local CHASE_MAX_RATIO = 1.4 -- chase anyone up to 1.4× my size
+
 	local fleeTarget: Vector3? = nil
 	local fleeDist = FLEE_RANGE
 	local chaseTarget: Vector3? = nil
@@ -1123,10 +1157,10 @@ function BotService:_findNearestWormThreat(botName: string, botPos: Vector3, bot
 		end
 
 		local dist = (hrp.Position - botPos).Magnitude
-		if wormData.Segments > botSegments and dist < fleeDist then
+		if wormData.Segments > botSegments * FLEE_SIZE_RATIO and dist < fleeDist then
 			fleeDist = dist
 			fleeTarget = hrp.Position
-		elseif wormData.Segments < botSegments * 0.7 and dist < chaseDist then
+		elseif wormData.Segments <= botSegments * CHASE_MAX_RATIO and dist < chaseDist then
 			chaseDist = dist
 			chaseTarget = hrp.Position
 		end
@@ -1147,10 +1181,10 @@ function BotService:_findNearestWormThreat(botName: string, botPos: Vector3, bot
 		end
 
 		local dist = (otherHrp.Position - botPos).Magnitude
-		if otherData.Segments > botSegments and dist < fleeDist then
+		if otherData.Segments > botSegments * FLEE_SIZE_RATIO and dist < fleeDist then
 			fleeDist = dist
 			fleeTarget = otherHrp.Position
-		elseif otherData.Segments < botSegments * 0.7 and dist < chaseDist then
+		elseif otherData.Segments <= botSegments * CHASE_MAX_RATIO and dist < chaseDist then
 			chaseDist = dist
 			chaseTarget = otherHrp.Position
 		end
@@ -1849,7 +1883,7 @@ function BotService:KnitStart()
 		for _, gname in ghostNames do
 			local gdata = self._botGhosts[gname]
 			if gdata then
-				self:_updateBotGhostAI(gdata, now)
+				self:_updateBotGhostAI(gdata, now, dt)
 				if self._botGhosts[gname] then -- still alive after AI tick
 					self:_checkBotGhostEaten(gdata)
 				end
