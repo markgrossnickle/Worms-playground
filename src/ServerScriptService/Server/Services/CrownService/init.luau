@@ -96,34 +96,56 @@ function CrownService:_createCrownModel(): (Model, BasePart)
 	local model = Instance.new("Model")
 	model.Name = "Crown"
 
-	-- Pedestal/base part (yellow neon cylinder)
-	local crown = Instance.new("Part")
-	crown.Name = "CrownBody"
-	crown.Shape = Enum.PartType.Cylinder
-	crown.Size = Vector3.new(2.5, 4.5, 4.5)
-	crown.CFrame = CFrame.new(0, 0, 0) * CFrame.Angles(0, 0, math.rad(90))
-	crown.Anchored = true
-	crown.CanCollide = false
-	crown.CanQuery = false
-	crown.Material = Enum.Material.Neon
-	crown.Color = Color3.fromRGB(255, 220, 60)
-	crown.Transparency = 0.05
-	crown.Parent = model
+	-- Hidden reference Part used as PrimaryPart. The visible band uses a
+	-- 90° Z rotation to make a Roblox Cylinder vertical (the engine's
+	-- Cylinder shape has its axis along local +X; we need it vertical).
+	-- If we used the band itself as the PrimaryPart, every
+	-- `model:PivotTo(CFrame.new(pos))` call (an identity-rotation pivot)
+	-- would WIPE that 90° rotation, leaving the band lying on its side —
+	-- which from a top-down camera reads as a flat yellow rectangle, the
+	-- "looks like a box" bug. Pivoting against an identity-rotation
+	-- reference instead preserves the band's relative 90° offset.
+	local ref = Instance.new("Part")
+	ref.Name = "CrownRef"
+	ref.Size = Vector3.new(0.1, 0.1, 0.1)
+	ref.Transparency = 1
+	ref.Anchored = true
+	ref.CanCollide = false
+	ref.CanQuery = false
+	ref.CastShadow = false
+	ref.Parent = model
+	model.PrimaryPart = ref
 
-	-- Top spikes (three small parts for silhouette readability)
+	-- Crown band: thin vertical neon cylinder. 1.2 stud tall, 4.5 stud
+	-- diameter — reads as a band, not a chunky pedestal.
+	local band = Instance.new("Part")
+	band.Name = "CrownBody"
+	band.Shape = Enum.PartType.Cylinder
+	band.Size = Vector3.new(1.2, 4.5, 4.5)
+	band.CFrame = CFrame.new(0, 0, 0) * CFrame.Angles(0, 0, math.rad(90))
+	band.Anchored = true
+	band.CanCollide = false
+	band.CanQuery = false
+	band.Material = Enum.Material.Neon
+	band.Color = Color3.fromRGB(255, 220, 60)
+	band.Transparency = 0.05
+	band.Parent = model
+
+	-- Five tapered prongs sticking up off the band, evenly spaced. Thin
+	-- vertical blocks read as crown points from any angle, including
+	-- top-down. Center is at band-top + half their height.
 	for i = 1, 5 do
-		local spike = Instance.new("Part")
-		spike.Name = "Spike" .. i
-		spike.Shape = Enum.PartType.Ball
-		spike.Size = Vector3.new(1, 1, 1)
+		local prong = Instance.new("Part")
+		prong.Name = "Prong" .. i
+		prong.Size = Vector3.new(0.55, 1.8, 0.55)
 		local angle = (i - 1) * (2 * math.pi / 5)
-		spike.CFrame = CFrame.new(math.cos(angle) * 1.8, 2.5, math.sin(angle) * 1.8)
-		spike.Anchored = true
-		spike.CanCollide = false
-		spike.CanQuery = false
-		spike.Material = Enum.Material.Neon
-		spike.Color = Color3.fromRGB(255, 240, 100)
-		spike.Parent = model
+		prong.CFrame = CFrame.new(math.cos(angle) * 1.85, 1.5, math.sin(angle) * 1.85)
+		prong.Anchored = true
+		prong.CanCollide = false
+		prong.CanQuery = false
+		prong.Material = Enum.Material.Neon
+		prong.Color = Color3.fromRGB(255, 240, 100)
+		prong.Parent = model
 	end
 
 	-- Glow
@@ -131,7 +153,7 @@ function CrownService:_createCrownModel(): (Model, BasePart)
 	light.Color = Color3.fromRGB(255, 220, 60)
 	light.Brightness = 4
 	light.Range = 30
-	light.Parent = crown
+	light.Parent = band
 
 	-- Pillar of light pointing up so the Crown is findable from far away
 	local pillar = Instance.new("Part")
@@ -153,7 +175,7 @@ function CrownService:_createCrownModel(): (Model, BasePart)
 	billboard.StudsOffset = Vector3.new(0, 5, 0)
 	billboard.AlwaysOnTop = true
 	billboard.LightInfluence = 0
-	billboard.Parent = crown
+	billboard.Parent = band
 
 	local label = Instance.new("TextLabel")
 	label.Size = UDim2.fromScale(1, 1)
@@ -166,10 +188,12 @@ function CrownService:_createCrownModel(): (Model, BasePart)
 	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 	label.Parent = billboard
 
-	model.PrimaryPart = crown
 	model.Parent = workspace
 
-	return model, crown
+	-- Returning `band` as the second value: callers (e.g. `_crownPart`) read
+	-- this for "where is the crown right now," and the band's world position
+	-- equals the model pivot, so there's no observable behaviour change.
+	return model, band
 end
 
 function CrownService:_destroyCrownModel()

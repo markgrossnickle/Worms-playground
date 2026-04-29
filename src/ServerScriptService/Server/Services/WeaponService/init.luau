@@ -258,6 +258,20 @@ function WeaponService:_validateShoot(player: Player, origin: Vector3, direction
 		return false
 	end
 
+	-- Server-validate aim cone: the ghost's HRP yaw tracks the camera in
+	-- LockFirstPerson, so a legitimate shot direction should be within a
+	-- generous cone of the ghost's LookVector. This rejects the trivial
+	-- aimbot/wallhack vector where a client picks any direction (including
+	-- backward) regardless of where they're actually looking.
+	-- cos(80°) ≈ 0.17 — generous enough that pitch + recoil + spread don't
+	-- false-positive, tight enough that "shoot 180° behind me" is rejected.
+	local dirUnit = direction.Unit
+	local look = hrp.CFrame.LookVector
+	if dirUnit:Dot(look) < 0.17 then
+		warn("WeaponService: Shot direction outside aim cone for", player.Name)
+		return false
+	end
+
 	-- Fire rate check
 	local weaponDef = WeaponConfig.Weapons[weaponData.Type]
 	local minInterval = 60 / weaponDef.FireRate

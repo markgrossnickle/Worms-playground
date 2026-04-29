@@ -15,6 +15,7 @@ local PowerUpService -- Set in KnitStart via require
 local ShrinkZoneService -- Set in KnitStart via require
 local TeamService -- Set in KnitStart via require
 local SandTideService -- Set in KnitStart via require
+local CrownService -- Set in KnitStart via require
 
 local HALF_ARENA = WormConfig.ArenaSize / 2
 local MIN_RECORD_DISTANCE = 0.5
@@ -24,10 +25,18 @@ local BOT_SEGMENT_LERP_DURATION = 0.4
 local BOT_SEGMENT_LERP_DELAY = 0.08
 
 local TARGET_TOTAL_WORMS = 24
-local FOOD_SEEK_RANGE = 30
-local POWERUP_SEEK_RANGE = 20
-local FLEE_RANGE = 20
-local CHASE_RANGE = 15
+-- Engagement ranges. Bumped from earlier values so bots actually fight on
+-- the smaller 800-stud arena instead of slithering past each other and
+-- only ever eating food. CHASE_RANGE bumped 15 -> 45 is the big one.
+local FOOD_SEEK_RANGE = 50
+local POWERUP_SEEK_RANGE = 35
+local FLEE_RANGE = 28
+local CHASE_RANGE = 45
+-- Worm King: how close a bot must be before it pursues a dropped Crown,
+-- and how aggressively it chases the enemy carrier. Larger than CHASE_RANGE
+-- because the Crown is a global objective worth a real detour.
+local CROWN_PICKUP_RANGE = 120
+local CROWN_CARRIER_CHASE_RANGE = 100
 local DIRECTION_CHANGE_MIN = 1
 local DIRECTION_CHANGE_MAX = 3
 local BOOST_CHANCE = 0.1
@@ -117,11 +126,29 @@ type BotData = {
 	SegmentPositions: { [number]: Vector3 },
 }
 
+-- Bot ghost: NPC version of a player ghost. Spawns when a bot worm dies so
+-- there's visible activity outside the alive-worm population. Uses a
+-- standard Roblox Humanoid + MoveTo for pathfinding (rather than the
+-- anchored-CFrame approach the worm uses) so the ghost reads as walking
+-- around like a normal NPC.
+type BotGhostData = {
+	Name: string,
+	Model: Model,
+	Humanoid: Humanoid,
+	HRP: BasePart,
+	Color: Color3,
+	TeamIndex: number, -- 0 if no team (solo / FFA)
+	State: string,
+	NextWanderTarget: number,
+	DespawnAt: number,
+}
+
 local BotService = Knit.CreateService({
 	Name = "BotService",
 	Client = {},
 
 	_bots = {} :: { [string]: BotData },
+	_botGhosts = {} :: { [string]: BotGhostData },
 	_usedNames = {} :: { [string]: boolean },
 	_roundActive = false,
 	_roundBotStats = {} :: { [string]: { Kills: number, MaxSegments: number } },
@@ -511,6 +538,17 @@ function BotService:_killBot(botName: string, killerName: string?)
 		TeamService:RemoveFromTeam(botName)
 	end
 
+	-- Snapshot for bot ghost spawn: take the death position from the head
+	-- BEFORE we destroy the worm model, and pull team color so the ghost
+	-- reads as the same team.
+	local deathPos = botData.HeadPosition
+	local deathColor = botData.Color
+	local deathTeam: number = 0
+	if TeamService and TeamService:IsEnabled() then
+		deathTeam = TeamService:GetTeamForMember(botName) or 0
+	end
+	local ghostName = botName .. "_Ghost"
+
 	botData.Model:Destroy()
 
 	self._usedNames[botName] = nil
@@ -518,6 +556,320 @@ function BotService:_killBot(botName: string, killerName: string?)
 
 	-- Fire signal for RoundService to track eliminations
 	self.BotKilled:Fire(botName, killerName)
+
+	-- Spawn an NPC ghost where the bot died. Round-active gate so the
+	-- ghost doesn't outlive the round itself.
+	if self._roundActive then
+		self:_spawnBotGhost(ghostName, deathPos, deathColor, deathTeam)
+	end
+end
+
+--------------------------------------------------
+-- Bot ghosts (NPC ghost AI)
+--------------------------------------------------
+
+-- Build a minimal humanoid ghost model. Same visual language as the
+-- WormService fallback ghost: small neon ball head + box torso, glow
+-- light, transparency from WormConfig.Ghost.
+function BotService:_buildBotGhostModel(name: string, color: Color3): (Model, Humanoid, BasePart)
+	local ghostConfig = WormConfig.Ghost
+	local model = Instance.new("Model")
+	model.Name = name
+	model:SetAttribute("IsGhost", true)
+	model:SetAttribute("IsBotGhost", true)
+	model:SetAttribute("GhostOwner", name)
+
+	local hrp = Instance.new("Part")
+	hrp.Name = "HumanoidRootPart"
+	hrp.Size = Vector3.new(2, 2, 1)
+	hrp.Transparency = 1
+	hrp.CanCollide = true
+	hrp.Material = Enum.Material.Neon
+	hrp.Color = color
+	hrp.Parent = model
+	model.PrimaryPart = hrp
+
+	local humanoid = Instance.new("Humanoid")
+	humanoid.WalkSpeed = ghostConfig.WalkSpeed * 0.7
+	humanoid.JumpPower = ghostConfig.JumpPower
+	humanoid.MaxHealth = math.huge
+	humanoid.Health = math.huge
+	-- BreakJointsOnDeath off so the ghost doesn't ragdoll if its model is
+	-- transiently mis-jointed during construction.
+	humanoid.BreakJointsOnDeath = false
+	humanoid.Parent = model
+
+	-- Head — a small bright neon ball, the most visible part from any angle.
+	local head = Instance.new("Part")
+	head.Name = "Head"
+	head.Shape = Enum.PartType.Ball
+	head.Size = Vector3.new(1.4, 1.4, 1.4)
+	head.Color = color
+	head.Material = Enum.Material.Neon
+	head.Transparency = ghostConfig.Transparency
+	head.CanCollide = false
+	head.Massless = true
+	head.Parent = model
+
+	local headWeld = Instance.new("Weld")
+	headWeld.Part0 = hrp
+	headWeld.Part1 = head
+	headWeld.C0 = CFrame.new(0, 1.2, 0)
+	headWeld.Parent = head
+
+	-- Torso block underneath the head so the ghost has a body silhouette.
+	local torso = Instance.new("Part")
+	torso.Name = "Torso"
+	torso.Size = Vector3.new(1.4, 1.6, 0.8)
+	torso.Color = color
+	torso.Material = Enum.Material.Neon
+	torso.Transparency = ghostConfig.Transparency
+	torso.CanCollide = false
+	torso.Massless = true
+	torso.Parent = model
+
+	local torsoWeld = Instance.new("Weld")
+	torsoWeld.Part0 = hrp
+	torsoWeld.Part1 = torso
+	torsoWeld.C0 = CFrame.new(0, 0, 0)
+	torsoWeld.Parent = torso
+
+	-- Glow light on head
+	local light = Instance.new("PointLight")
+	light.Brightness = ghostConfig.GlowBrightness
+	light.Range = ghostConfig.GlowRange
+	light.Color = color
+	light.Parent = head
+
+	-- Wisp particles
+	local emitter = Instance.new("ParticleEmitter")
+	emitter.Name = "GhostWisp"
+	emitter.Color = ColorSequence.new(color, Color3.fromRGB(255, 255, 255))
+	emitter.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.4),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	emitter.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.5),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	emitter.Lifetime = NumberRange.new(0.5, 1.2)
+	emitter.Rate = 12
+	emitter.Speed = NumberRange.new(1, 3)
+	emitter.SpreadAngle = Vector2.new(180, 180)
+	emitter.LightEmission = 1
+	emitter.LightInfluence = 0
+	emitter.Parent = hrp
+
+	-- Name label
+	local billboard = Instance.new("BillboardGui")
+	billboard.Size = UDim2.fromOffset(110, 22)
+	billboard.StudsOffset = Vector3.new(0, 2.4, 0)
+	billboard.AlwaysOnTop = true
+	billboard.LightInfluence = 0
+	billboard.Parent = head
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 14
+	label.Text = name
+	label.TextColor3 = color
+	label.TextStrokeTransparency = 0.2
+	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	label.Parent = billboard
+
+	return model, humanoid, hrp
+end
+
+-- Spawn an NPC ghost for a dead bot. They wander around the arena and can
+-- be eaten by enemy worms (same +EatValue segments as a player ghost).
+-- Auto-despawns after BOT_GHOST_LIFETIME.
+local BOT_GHOST_LIFETIME = 30 -- seconds before auto-despawn
+local BOT_GHOST_WANDER_RADIUS = 18
+
+function BotService:_spawnBotGhost(name: string, deathPos: Vector3, color: Color3, teamIndex: number)
+	-- Don't double-spawn (defensive — bot worm deaths can fire multiple paths).
+	if self._botGhosts[name] then
+		return
+	end
+
+	-- Use team color for the ghost if we're in team mode and have a team.
+	local ghostColor = color
+	if TeamService and TeamService:IsEnabled() and teamIndex > 0 then
+		local teamColor = TeamService:GetTeamColor(teamIndex)
+		if teamColor then
+			ghostColor = teamColor
+		end
+	end
+
+	local model, humanoid, hrp = self:_buildBotGhostModel(name, ghostColor)
+
+	-- Position a couple studs above ground so the humanoid lands cleanly.
+	local spawnY = TerrainHeight.getSurfaceY(deathPos.X, deathPos.Z) + 3
+	hrp.CFrame = CFrame.new(deathPos.X, spawnY, deathPos.Z)
+	model.Parent = workspace
+
+	-- CRITICAL: pin physics authority to the server. With Humanoid +
+	-- unanchored, Roblox's default behavior is to assign network ownership
+	-- to the nearest player every frame, which then competes with the
+	-- server's `Humanoid:MoveTo` and gives that client a trivial speedhack
+	-- vector. Calling `SetNetworkOwner(nil)` on the assembly root forces
+	-- server simulation. Must be called AFTER parenting to workspace.
+	pcall(function()
+		hrp:SetNetworkOwner(nil)
+	end)
+
+	self._botGhosts[name] = {
+		Name = name,
+		Model = model,
+		Humanoid = humanoid,
+		HRP = hrp,
+		Color = ghostColor,
+		TeamIndex = teamIndex,
+		State = "Alive",
+		NextWanderTarget = 0, -- forces a wander on the first AI tick
+		DespawnAt = os.clock() + BOT_GHOST_LIFETIME,
+	}
+end
+
+function BotService:_despawnBotGhost(name: string)
+	local data = self._botGhosts[name]
+	if not data then
+		return
+	end
+	if data.Model and data.Model.Parent then
+		data.Model:Destroy()
+	end
+	self._botGhosts[name] = nil
+end
+
+function BotService:_despawnAllBotGhosts()
+	for name in self._botGhosts do
+		self:_despawnBotGhost(name)
+	end
+end
+
+-- Per-tick AI: wander to a random offset every few seconds. If a worm is
+-- close, pursue it (visual menace — actual eating is handled by
+-- _checkBotGhostEaten so the ghost just walks until eaten or timed out).
+function BotService:_updateBotGhostAI(data: BotGhostData, now: number)
+	if data.State ~= "Alive" then
+		return
+	end
+
+	-- Auto-despawn after lifetime
+	if now >= data.DespawnAt then
+		self:_despawnBotGhost(data.Name)
+		return
+	end
+
+	-- Skip if model invalidated (e.g. workspace stream-out)
+	if not data.Model.Parent or not data.HRP.Parent then
+		self:_despawnBotGhost(data.Name)
+		return
+	end
+
+	-- Pursue nearby worms occasionally. Picks the closest enemy worm
+	-- (player or bot) within 35 studs. If found, walk toward it. Falls
+	-- back to wander when no target.
+	local pos = data.HRP.Position
+	local closestEnemyPos: Vector3? = nil
+	local closestDist = 35
+
+	for player, wormData in WormService._worms do
+		if wormData.State == "Alive" and wormData.HeadPosition then
+			if not (TeamService and TeamService:AreTeammates(data.Name, player.Name)) then
+				local dist = (wormData.HeadPosition - pos).Magnitude
+				if dist < closestDist then
+					closestDist = dist
+					closestEnemyPos = wormData.HeadPosition
+				end
+			end
+		end
+	end
+	for botName, botData in self._bots do
+		if botData.State == "Alive" and botData.HeadPosition then
+			if not (TeamService and TeamService:AreTeammates(data.Name, botName)) then
+				local dist = (botData.HeadPosition - pos).Magnitude
+				if dist < closestDist then
+					closestDist = dist
+					closestEnemyPos = botData.HeadPosition
+				end
+			end
+		end
+	end
+
+	if closestEnemyPos then
+		-- Pursuit: walk straight toward the worm. Re-issue MoveTo every
+		-- 0.5s so the path keeps tracking moving targets.
+		if now >= data.NextWanderTarget then
+			data.Humanoid:MoveTo(closestEnemyPos)
+			data.NextWanderTarget = now + 0.5
+		end
+		return
+	end
+
+	-- Wander: pick a new random target every 2-4 seconds.
+	if now >= data.NextWanderTarget then
+		local angle = math.random() * math.pi * 2
+		local dist = math.random() * BOT_GHOST_WANDER_RADIUS + 5
+		local target = pos + Vector3.new(math.cos(angle) * dist, 0, math.sin(angle) * dist)
+		-- Clamp to arena interior so the ghost doesn't pathfind off the map.
+		local margin = 30
+		target = Vector3.new(
+			math.clamp(target.X, -HALF_ARENA + margin, HALF_ARENA - margin),
+			target.Y,
+			math.clamp(target.Z, -HALF_ARENA + margin, HALF_ARENA - margin)
+		)
+		data.Humanoid:MoveTo(target)
+		data.NextWanderTarget = now + 2 + math.random() * 2
+	end
+end
+
+-- A worm walking through the bot ghost "eats" it: the worm gains
+-- WormConfig.Ghost.EatValue segments, the ghost despawns, and we fire
+-- the GhostEaten signal so clients show a poof.
+function BotService:_checkBotGhostEaten(data: BotGhostData)
+	if data.State ~= "Alive" then
+		return
+	end
+	local pos = data.HRP.Position
+	local eatRadius = WormConfig.CollisionRadius + 1
+	local eatRadiusSq = eatRadius * eatRadius
+
+	-- Player worms
+	for player, wormData in WormService._worms do
+		if wormData.State == "Alive" and wormData.HeadPosition then
+			if not (TeamService and TeamService:AreTeammates(data.Name, player.Name)) then
+				local dx = wormData.HeadPosition.X - pos.X
+				local dz = wormData.HeadPosition.Z - pos.Z
+				if dx * dx + dz * dz < eatRadiusSq then
+					WormService:AddSegments(player, WormConfig.Ghost.EatValue)
+					WormService.Client.GhostEaten:FireAll(pos, player.Name)
+					self:_despawnBotGhost(data.Name)
+					return
+				end
+			end
+		end
+	end
+
+	-- Bot worms
+	for botName, botData in self._bots do
+		if botData.State == "Alive" and botData.HeadPosition then
+			if not (TeamService and TeamService:AreTeammates(data.Name, botName)) then
+				local dx = botData.HeadPosition.X - pos.X
+				local dz = botData.HeadPosition.Z - pos.Z
+				if dx * dx + dz * dz < eatRadiusSq then
+					WormService:AddSegments(botName, WormConfig.Ghost.EatValue)
+					WormService.Client.GhostEaten:FireAll(pos, botName)
+					self:_despawnBotGhost(data.Name)
+					return
+				end
+			end
+		end
+	end
 end
 
 function BotService:DamageBot(
@@ -813,6 +1165,10 @@ function BotService:_findNearestWormThreat(botName: string, botPos: Vector3, bot
 	return nil, false
 end
 
+-- Priority-stacked AI tick. Earlier priorities short-circuit later ones.
+-- Order (high → low): sand-tide-out-of-bounds → shrink-zone → wall →
+-- carrying-crown-go-home → crown-pickup → crown-carrier-chase → flee/chase
+-- worms → power-up → food → wander.
 function BotService:_updateAI(botData: BotData, now: number)
 	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if not hrp then
@@ -822,18 +1178,50 @@ function BotService:_updateAI(botData: BotData, now: number)
 	-- Read from server-side source of truth (updated every Heartbeat) rather than
 	-- the Part, which only reflects the most recent 10Hz flush.
 	local botPos = botData.HeadPosition
+	local botTeam: number? = nil
+	if TeamService and TeamService:IsEnabled() then
+		botTeam = TeamService:GetTeamForMember(botData.Name)
+	end
 
-	-- Shrink zone avoidance (highest priority)
+	-- Stop boosting after duration (apply BEFORE early returns so it runs every tick)
+	if botData.Boosting and now >= botData.BoostEndTime then
+		botData.Boosting = false
+	end
+
+	-- Sand tide avoidance (Worm King mode). The triangle contracts during
+	-- the match; bots outside (and not in a friendly base safe zone) take
+	-- HP/sec damage. Head back toward our team's base centroid before we
+	-- get fried.
+	if SandTideService and TeamService and TeamService:IsEnabled() and botTeam and botTeam > 0 then
+		local scale = SandTideService:GetScale()
+		if scale < 1.0 then
+			local insideTri = TeamBase.isInsideTriangle(botPos.X, botPos.Z, scale)
+			if not insideTri then
+				-- Head straight back to our team base — closest safe zone.
+				local basePos = TeamBase.getScaledBasePositionXZ(botTeam, scale)
+				local toBase = Vector3.new(basePos.X - botPos.X, 0, basePos.Z - botPos.Z)
+				if toBase.Magnitude > 0.1 then
+					botData.Direction = toBase.Unit
+					botData.NextDirectionChange = now + 0.3
+					if botData.Segments > WormConfig.MinBoostSegments + 2 then
+						botData.Boosting = true
+						botData.BoostEndTime = now + 1.5
+					end
+				end
+				return
+			end
+		end
+	end
+
+	-- Shrink zone avoidance (legacy BR mode — only meaningful when zone is active)
 	local zoneRadius = ShrinkZoneService:GetCurrentRadius()
 	local distFromCenter = Vector3.new(botPos.X, 0, botPos.Z).Magnitude
 	local zoneMargin = 50
 	if distFromCenter > zoneRadius - zoneMargin and zoneRadius < HALF_ARENA then
-		-- Move toward center
 		local toCenter = (Vector3.zero - Vector3.new(botPos.X, 0, botPos.Z))
 		if toCenter.Magnitude > 0.1 then
 			botData.Direction = toCenter.Unit
 			botData.NextDirectionChange = now + 0.5
-			-- Boost if getting close to edge
 			if distFromCenter > zoneRadius - 20 and botData.Segments > WormConfig.MinBoostSegments + 2 then
 				botData.Boosting = true
 				botData.BoostEndTime = now + 1
@@ -860,6 +1248,62 @@ function BotService:_updateAI(botData: BotData, now: number)
 		botData.Direction = awayDir.Unit
 		botData.NextDirectionChange = now + 0.5
 		return
+	end
+
+	-- Worm King: crown logic. Carrier returns to home base; non-carriers
+	-- pursue a dropped crown if it's in range; if the crown is on an
+	-- ENEMY carrier we hunt them down.
+	if CrownService and TeamService and TeamService:IsEnabled() and botTeam and botTeam > 0 then
+		local crownState = CrownService:GetState()
+		local carryingMyself = CrownService:IsCarriedBy(botData.Name)
+
+		if carryingMyself then
+			-- Head straight to my team base — score is awarded while carrying.
+			-- Boost when we have segments to spare so we get there before
+			-- being intercepted.
+			local scale = if SandTideService then SandTideService:GetScale() else 1.0
+			local basePos = TeamBase.getScaledBasePositionXZ(botTeam, scale)
+			local toBase = Vector3.new(basePos.X - botPos.X, 0, basePos.Z - botPos.Z)
+			if toBase.Magnitude > 0.1 then
+				botData.Direction = toBase.Unit
+				botData.NextDirectionChange = now + 0.3
+				if botData.Segments > WormConfig.MinBoostSegments + 2 and not botData.Boosting then
+					botData.Boosting = true
+					botData.BoostEndTime = now + 1.5
+				end
+			end
+			return
+		end
+
+		if crownState.Name == "Dropped" then
+			-- Race to the drop point if it's reachable.
+			local dropPos = crownState.Position
+			local toCrown = Vector3.new(dropPos.X - botPos.X, 0, dropPos.Z - botPos.Z)
+			if toCrown.Magnitude < CROWN_PICKUP_RANGE and toCrown.Magnitude > 0.1 then
+				botData.Direction = toCrown.Unit
+				botData.NextDirectionChange = now + 0.4
+				return
+			end
+		elseif crownState.Name == "Carried" and crownState.CarrierName then
+			-- Hunt the enemy carrier (NOT a teammate's carry — that's a win
+			-- for our side, leave them alone).
+			local carrierName = crownState.CarrierName
+			if not TeamService:AreTeammates(botData.Name, carrierName) then
+				local carrierPos: Vector3? = self:_getWormHeadPosition(carrierName)
+				if carrierPos then
+					local toCarrier = Vector3.new(carrierPos.X - botPos.X, 0, carrierPos.Z - botPos.Z)
+					if toCarrier.Magnitude < CROWN_CARRIER_CHASE_RANGE and toCarrier.Magnitude > 0.1 then
+						botData.Direction = toCarrier.Unit
+						botData.NextDirectionChange = now + 0.3
+						if botData.Segments > WormConfig.MinBoostSegments + 2 and not botData.Boosting then
+							botData.Boosting = true
+							botData.BoostEndTime = now + 1
+						end
+						return
+					end
+				end
+			end
+		end
 	end
 
 	-- Flee larger worms / chase smaller worms
@@ -917,11 +1361,24 @@ function BotService:_updateAI(botData: BotData, now: number)
 			botData.BoostEndTime = now + BOOST_DURATION_MIN + math.random() * (BOOST_DURATION_MAX - BOOST_DURATION_MIN)
 		end
 	end
+end
 
-	-- Stop boosting after duration
-	if botData.Boosting and now >= botData.BoostEndTime then
-		botData.Boosting = false
+-- Lookup a worm's head position by name. Checks player worms first, then
+-- bot worms. Returns nil if the named entity doesn't exist or isn't alive.
+function BotService:_getWormHeadPosition(name: string): Vector3?
+	for player, wormData in WormService._worms do
+		if player.Name == name then
+			if wormData.State == "Alive" then
+				return wormData.HeadPosition
+			end
+			return nil
+		end
 	end
+	local botData = self._bots[name]
+	if botData and botData.State == "Alive" then
+		return botData.HeadPosition
+	end
+	return nil
 end
 
 --------------------------------------------------
@@ -992,8 +1449,14 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 	botData.HeadPosition = newPos
 	botData.HeadDirection = dir
 
-	-- Only flush to actual Parts at 10Hz to throttle replication bandwidth.
-	if self._broadcastTick % 6 == 0 then
+	-- Flush bot Part CFrames at 30Hz (every 2nd Heartbeat) instead of 10Hz.
+	-- Player worms can flush at 10Hz because the local player's camera
+	-- follows the player's own jumpy HRP — the relative motion of the
+	-- world cancels the discretisation. Bots are observed against a smooth
+	-- camera baseline, so 10Hz quantisation is visibly stuttery. 30Hz costs
+	-- 3× the bandwidth of 10Hz but is still well within budget for the
+	-- handful of bots a round actually has (~5-10).
+	if self._broadcastTick % 2 == 0 then
 		local newCFrame = CFrame.new(newPos, newPos + dir)
 		hrp.CFrame = newCFrame
 
@@ -1013,7 +1476,10 @@ function BotService:_updateBotSegments(botData: BotData)
 		return
 	end
 
-	local shouldFlush = self._broadcastTick % 6 == 0
+	-- Match the bot head's 30Hz flush rate (see _updateBotMovement comment).
+	-- Segments must update at the same rate as the head or the body will
+	-- visibly lag/snap in chunks.
+	local shouldFlush = self._broadcastTick % 2 == 0
 	local lerping = botData.LerpingSegments
 	local segCount = math.floor(botData.Segments)
 	for i = 1, segCount do
@@ -1091,18 +1557,24 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 	-- Gate Part.Position writes to 10Hz (every 6th Heartbeat) to stay within the
 	-- "Server Brain, Client Body" replication budget. Mirrors the logic in
 	-- WormService:_checkFoodCollection — pullSpeed is 6× to preserve stud/s rate.
+	-- Use WormService's broadcast tick (not this service's) so the claim-tick
+	-- guard correlates with the player-magnet pass running in the same frame.
 	local magnetFlush = (self._broadcastTick % 6 == 0)
+	local magnetTick = WormService._broadcastTick
 	for _, food in foodFolder:GetChildren() do
 		if food:IsA("BasePart") then
 			local diff = food.Position - headPos
 			local dist = diff.Magnitude
 
-			-- Pull nearby food toward head
+			-- Pull nearby food toward head. Shared claim-tick guard with
+			-- WormService prevents the same food being Position-replicated
+			-- twice in one tick when both a player and a bot are in range.
 			if
 				magnetFlush
 				and effectiveRange > 0
 				and dist < effectiveRange
 				and dist > WormConfig.CollisionRadius + 1
+				and WormService:_tryClaimMagnetPull(food, magnetTick)
 			then
 				local pullDir = -diff.Unit
 				food.Position = food.Position + pullDir * (pullSpeed * 6)
@@ -1224,6 +1696,10 @@ end
 
 function BotService:SetRoundActive(active: boolean)
 	self._roundActive = active
+	-- Round ended: tear down NPC ghosts so they don't outlive the round.
+	if not active then
+		self:_despawnAllBotGhosts()
+	end
 end
 
 function BotService:GetAliveCount(): number
@@ -1280,6 +1756,8 @@ function BotService:KillAllBots()
 			self._bots[name] = nil
 		end
 	end
+	-- Bot ghosts are tied to the round; clear them too.
+	self:_despawnAllBotGhosts()
 end
 
 function BotService:ClearRoundStats()
@@ -1319,6 +1797,7 @@ function BotService:KnitStart()
 	ShrinkZoneService = require(script.Parent.ShrinkZoneService)
 	TeamService = require(script.Parent.TeamService)
 	SandTideService = require(script.Parent.SandTideService)
+	CrownService = require(script.Parent.CrownService)
 
 	-- Spawn management loop — only fills when round is active
 	task.spawn(function()
@@ -1358,6 +1837,23 @@ function BotService:KnitStart()
 			self:_updateBotSegments(botData)
 			self:_checkBotFoodCollection(botData)
 			self:_checkBotCollisions(botData)
+		end
+
+		-- Bot ghost AI tick. Wander/pursuit at full Heartbeat rate is
+		-- cheap; collision check (eating) likewise. Iterate a snapshot
+		-- of names so a despawn during the loop doesn't break iteration.
+		local ghostNames = {}
+		for ghostName in self._botGhosts do
+			table.insert(ghostNames, ghostName)
+		end
+		for _, gname in ghostNames do
+			local gdata = self._botGhosts[gname]
+			if gdata then
+				self:_updateBotGhostAI(gdata, now)
+				if self._botGhosts[gname] then -- still alive after AI tick
+					self:_checkBotGhostEaten(gdata)
+				end
+			end
 		end
 	end)
 end

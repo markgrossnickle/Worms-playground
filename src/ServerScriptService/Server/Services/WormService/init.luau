@@ -28,10 +28,6 @@ type WormData = {
 	LastRecordedPos: Vector3,
 	SpawnTime: number,
 	LerpingSegments: { [number]: { StartTime: number, StartPos: Vector3 } }?, -- segment indices currently lerping after a mid-body hit
-	GrappleTarget: Vector3?,
-	GrappleStartTime: number,
-	GrappleStartPos: Vector3?,
-	GrappleCooldownEnd: number,
 	-- Cached position state: updated every frame as the source of truth for gameplay.
 	-- Actual Part CFrames are only written at 10Hz (every 6th Heartbeat) to keep
 	-- replication bandwidth bounded — see _broadcastTick.
@@ -92,6 +88,15 @@ local WormService = Knit.CreateService({
 	_totalRideTimes = {} :: { [Player]: number }, -- accumulated ride seconds
 	_batchSpawning = false, -- Suppress FoodSpawned signal during bulk food creation
 	_broadcastTick = 0, -- Heartbeat counter; Part CFrames are written when this % 6 == 0 (10Hz at 60fps)
+	-- Per-player rate-limit clocks for client RPCs that can be called at high
+	-- frequency. See Client:SetDirection / Client:GrappleAttached.
+	_lastDirSetTime = {} :: { [Player]: number },
+	_lastGrappleAttachTime = {} :: { [Player]: number },
+	-- Food-magnet de-dup table: weak-keyed so destroyed food is GC'd. Maps
+	-- food Part → magnet-tick number it was last pulled in. WormService and
+	-- BotService both call _tryClaimMagnetPull before writing food.Position
+	-- so the same food can't be Position-replicated twice in one tick.
+	_magnetClaim = setmetatable({}, { __mode = "k" }) :: any,
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -114,14 +119,74 @@ function WormService:_randomArenaPosition(): Vector3
 	return Vector3.new(x, TerrainHeight.getSmoothSurfaceY(x, z) + WormConfig.SegmentSize / 2, z)
 end
 
--- Worm King: pick a spawn point inside a team's base ring, or fall back to random if no team.
--- Bases ride the sand tide scale, so fetch the current scale from SandTideService.
+-- Distance any new spawn must keep from existing live worms (player + bot)
+-- so multiple players spawning the same frame don't pile on top of each other.
+local SPAWN_MIN_SEPARATION = 25
+local SPAWN_MAX_RETRIES = 16
+
+-- Returns true if `pos` is at least SPAWN_MIN_SEPARATION away from every
+-- alive worm head (players + bots).
+function WormService:_isSpawnPosClear(pos: Vector3): boolean
+	local minSq = SPAWN_MIN_SEPARATION * SPAWN_MIN_SEPARATION
+	for _, wormData in self._worms do
+		if wormData.State == "Alive" and wormData.HeadPosition then
+			local dx = wormData.HeadPosition.X - pos.X
+			local dz = wormData.HeadPosition.Z - pos.Z
+			if dx * dx + dz * dz < minSq then
+				return false
+			end
+		end
+	end
+	-- BotService keeps its own table; reach in via the Knit-loaded reference if available.
+	local BotService = self._botService
+	if BotService then
+		for _, botData in BotService._bots do
+			if botData.State == "Alive" and botData.HeadPosition then
+				local dx = botData.HeadPosition.X - pos.X
+				local dz = botData.HeadPosition.Z - pos.Z
+				if dx * dx + dz * dz < minSq then
+					return false
+				end
+			end
+		end
+	end
+	return true
+end
+
+-- Solo-mode spawn picker: tries up to SPAWN_MAX_RETRIES random positions,
+-- accepting the first that's clear of existing worms. Falls back to the
+-- last candidate if none qualify (rare; only happens on very crowded maps).
+function WormService:_findSpreadArenaPosition(): Vector3
+	local last: Vector3 = self:_randomArenaPosition()
+	if self:_isSpawnPosClear(last) then
+		return last
+	end
+	for _ = 1, SPAWN_MAX_RETRIES do
+		local cand = self:_randomArenaPosition()
+		if self:_isSpawnPosClear(cand) then
+			return cand
+		end
+		last = cand
+	end
+	return last
+end
+
+-- Worm King: pick a spawn point inside a team's base ring. Uses a per-team
+-- round-robin slot counter so simultaneous spawns map to distinct points on
+-- the 8-slot ring (BaseSpawnCount = 8). Bases ride the sand tide scale, so
+-- fetch the current scale from SandTideService.
 function WormService:_spawnPositionForTeam(teamIndex: number?): Vector3
 	if not teamIndex or teamIndex <= 0 then
-		return self:_randomArenaPosition()
+		return self:_findSpreadArenaPosition()
 	end
 	local scale = if SandTideService then SandTideService:GetScale() else 1.0
-	return TeamBase.getScaledSpawnPosition(teamIndex, scale, nil)
+	-- Per-team rolling slot; first call gets slot 0, then 1, 2, ... wrapping
+	-- at BaseSpawnCount. This guarantees N≤BaseSpawnCount concurrent spawns
+	-- get distinct ring points; for N>BaseSpawnCount, wraps deterministically.
+	self._teamSpawnSlot = self._teamSpawnSlot or { 0, 0, 0 }
+	local slot = self._teamSpawnSlot[teamIndex] or 0
+	self._teamSpawnSlot[teamIndex] = slot + 1
+	return TeamBase.getScaledSpawnPosition(teamIndex, scale, slot)
 end
 
 -- Worm King: initial facing when spawning at a team base — point toward centroid so worms
@@ -1161,6 +1226,18 @@ end
 -- Game loop
 --------------------------------------------------
 
+-- Returns true exactly once per `tickNum` per `food` — the first caller in a
+-- tick wins the right to write food.Position; subsequent callers (other
+-- worms / bots within range of the same food) get false and skip the
+-- write. Prevents double-replication of the same Part Position in a tick.
+function WormService:_tryClaimMagnetPull(food: BasePart, tickNum: number): boolean
+	if self._magnetClaim[food] == tickNum then
+		return false
+	end
+	self._magnetClaim[food] = tickNum
+	return true
+end
+
 function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
@@ -1184,12 +1261,14 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 			local diff = food.Position - headPos
 			local dist = diff.Magnitude
 
-			-- Pull nearby food toward head
+			-- Pull nearby food toward head. Claim-tick guard avoids
+			-- double-write when multiple worms are in range of the same food.
 			if
 				magnetFlush
 				and effectiveRange > 0
 				and dist < effectiveRange
 				and dist > WormConfig.CollisionRadius + 1
+				and self:_tryClaimMagnetPull(food, self._broadcastTick)
 			then
 				local pullDir = -diff.Unit
 				food.Position = food.Position + pullDir * (pullSpeed * 6)
@@ -1598,51 +1677,6 @@ function WormService:_updateMovement(player: Player, dt: number)
 	wormData.CurrentDirection = dir
 
 	local shouldBroadcast = (self._broadcastTick % 6 == 0)
-
-	-- Ground grapple pull: override direction and speed when active
-	if wormData.GrappleTarget then
-		local elapsed = os.clock() - wormData.GrappleStartTime
-		if elapsed >= WormConfig.Grapple.PullDuration then
-			-- Grapple finished
-			wormData.GrappleTarget = nil
-			wormData.GrappleStartPos = nil
-			wormData.GrappleCooldownEnd = os.clock() + WormConfig.Grapple.Cooldown
-		else
-			local alpha = math.clamp(elapsed / WormConfig.Grapple.PullDuration, 0, 1)
-			local startPos = wormData.GrappleStartPos :: Vector3
-			local targetPos = wormData.GrappleTarget :: Vector3
-			local newPos = startPos:Lerp(targetPos, alpha)
-			newPos = Vector3.new(
-				newPos.X,
-				TerrainHeight.getSmoothSurfaceY(newPos.X, newPos.Z) + WormConfig.SegmentSize / 2,
-				newPos.Z
-			)
-
-			local pullDir = (targetPos - startPos) * Vector3.new(1, 0, 1)
-			if pullDir.Magnitude > 0.1 then
-				dir = pullDir.Unit
-				wormData.CurrentDirection = dir
-			end
-
-			-- Always update cached gameplay state every frame.
-			wormData.HeadPosition = newPos
-			wormData.HeadDirection = dir
-
-			-- Only write to Parts at 10Hz to limit anchored-Part replication.
-			if shouldBroadcast then
-				local newCFrame = CFrame.new(newPos, newPos + dir)
-				hrp.CFrame = newCFrame
-
-				local wormHead = character:FindFirstChild("WormHead") :: BasePart?
-				if wormHead then
-					wormHead.CFrame = newCFrame
-				end
-			end
-
-			self:_recordPosition(wormData, newPos)
-			return
-		end
-	end
 
 	-- Move HRP in direction (anchored, so CFrame set is authoritative).
 	-- Read from cached HeadPosition (source of truth) rather than hrp.Position,
@@ -2117,20 +2151,51 @@ end
 -- Ghost rider tracking
 --------------------------------------------------
 
+-- Maximum world distance allowed between a ghost and the worm head it's
+-- claiming to grapple onto. The ghost grapple range itself is tuned via
+-- WormConfig.Grapple.Range; we add 50% slack to account for the lerp in
+-- progress at attach-time on the client.
+local GRAPPLE_ATTACH_MAX_DIST = WormConfig.Grapple.Range * 1.5
+-- Clients fire GrappleAttached/Detached around the snap moment; once per
+-- attempt is plenty. 0.4s blocks the trivial 60Hz spam DoS on the worm
+-- owner's RiderAttached signal.
+local GRAPPLE_ATTACH_MIN_INTERVAL = 0.4
+
 function WormService:_onGrappleAttached(player: Player, targetWormName: string)
-	-- Validate: player must be a ghost
-	if not self._ghosts[player] then
+	-- Rate limit: drop attaches faster than every 400ms per player. Without
+	-- this a malicious client can flood RiderAttached at the worm owner.
+	local now = os.clock()
+	local last = self._lastGrappleAttachTime[player] or 0
+	if now - last < GRAPPLE_ATTACH_MIN_INTERVAL then
 		return
 	end
-	-- Validate: target worm must exist and be alive
-	local targetOwner: Player? = nil
-	for p, data in self._worms do
-		if p.Name == targetWormName and data.State == "Alive" then
-			targetOwner = p
-			break
-		end
+	self._lastGrappleAttachTime[player] = now
+
+	-- Validate: player must be a ghost
+	local ghost = self._ghosts[player]
+	if not ghost then
+		return
 	end
+	local ghostHrp = ghost:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not ghostHrp then
+		return
+	end
+
+	-- Validate: target worm must exist and be alive (Players name lookup is
+	-- O(1) compared to scanning self._worms).
+	local targetOwner = Players:FindFirstChild(targetWormName) :: Player?
 	if not targetOwner then
+		return
+	end
+	local data = self._worms[targetOwner]
+	if not data or data.State ~= "Alive" then
+		return
+	end
+
+	-- Validate: ghost must actually be near the target worm head. Without
+	-- this a ghost across the map can claim to grapple anyone.
+	local targetHeadPos = data.HeadPosition or Vector3.zero
+	if (ghostHrp.Position - targetHeadPos).Magnitude > GRAPPLE_ATTACH_MAX_DIST then
 		return
 	end
 
@@ -2209,51 +2274,9 @@ function WormService.Client:GrappleDetached(player: Player)
 	self.Server:_onGrappleDetached(player)
 end
 
--- Client method for ground grapple (alive worm fast movement)
-function WormService.Client:GrappleGround(player: Player, targetX: number, targetZ: number)
-	if type(targetX) ~= "number" or type(targetZ) ~= "number" then
-		return
-	end
-	if targetX ~= targetX or targetZ ~= targetZ then
-		return -- NaN check
-	end
-
-	local wormData = self.Server._worms[player]
-	if not wormData or wormData.State ~= "Alive" then
-		return
-	end
-
-	-- Cooldown check
-	if os.clock() < wormData.GrappleCooldownEnd then
-		return
-	end
-
-	-- Already grappling
-	if wormData.GrappleTarget then
-		return
-	end
-
-	local character = player.Character
-	if not character then
-		return
-	end
-	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return
-	end
-
-	-- Validate range
-	local targetPos =
-		Vector3.new(targetX, TerrainHeight.getSmoothSurfaceY(targetX, targetZ) + WormConfig.SegmentSize / 2, targetZ)
-	local dist = (targetPos - hrp.Position).Magnitude
-	if dist > WormConfig.Grapple.Range then
-		return
-	end
-
-	wormData.GrappleTarget = targetPos
-	wormData.GrappleStartTime = os.clock()
-	wormData.GrappleStartPos = hrp.Position
-end
+-- (worm-grapple GrappleGround RPC removed — grapple is a ghost-only
+--  mechanic; ghost-side handlers are GrappleAttached / GrappleDetached above.
+--  See CLAUDE.md.)
 
 -- Client method to request ghost spawn/despawn
 function WormService.Client:ToggleGhost(player: Player)
@@ -2340,6 +2363,18 @@ function WormService:KillAllWorms()
 				end
 			end
 		end
+
+		-- Reset per-worm round state. Without this, PositionHistory and
+		-- SegmentPositions accumulate across rounds — PositionHistory grows
+		-- by ~120 entries/sec while alive (every 0.5 studs of movement) and
+		-- isn't trimmed on death. Over a few rounds this becomes thousands
+		-- of stale Vector3s per player.
+		wormData.SegmentPositions = {}
+		wormData.PositionHistory = {}
+		wormData.HistoryStart = 1
+		wormData.HistoryEnd = 0
+		wormData.LerpingSegments = nil
+		wormData.LastRecordedPos = Vector3.zero
 	end
 end
 
@@ -2365,6 +2400,11 @@ end
 -- Client methods
 --------------------------------------------------
 
+-- Per-player rate limit for SetDirection — clients politely throttle to 20 Hz
+-- (one update per 50 ms), so we accept up to 30 Hz with slack and drop the
+-- excess. Without this a malicious or buggy client can flood the server.
+local SET_DIRECTION_MIN_INTERVAL = 0.033
+
 function WormService.Client:SetDirection(player: Player, dirX: number, dirZ: number)
 	if type(dirX) ~= "number" or type(dirZ) ~= "number" then
 		return
@@ -2372,6 +2412,13 @@ function WormService.Client:SetDirection(player: Player, dirX: number, dirZ: num
 	if dirX ~= dirX or dirZ ~= dirZ then
 		return -- NaN check
 	end
+
+	local now = os.clock()
+	local last = self.Server._lastDirSetTime[player] or 0
+	if now - last < SET_DIRECTION_MIN_INTERVAL then
+		return
+	end
+	self.Server._lastDirSetTime[player] = now
 
 	local wormData = self.Server._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
@@ -2455,10 +2502,6 @@ local function newWormData(color: Color3): WormData
 		HistoryEnd = 0,
 		LastRecordedPos = Vector3.zero,
 		SpawnTime = 0,
-		GrappleTarget = nil,
-		GrappleStartTime = 0,
-		GrappleStartPos = nil,
-		GrappleCooldownEnd = 0,
 		HeadPosition = Vector3.zero, -- Overwritten on first movement / spawn
 		HeadDirection = Vector3.new(0, 0, -1),
 		SegmentPositions = {},
@@ -2473,6 +2516,10 @@ function WormService:KnitStart()
 	WeaponService = require(script.Parent.WeaponService)
 	LeaderboardService = require(script.Parent.LeaderboardService)
 	SandTideService = require(script.Parent.SandTideService)
+
+	-- Cached for spawn-spread checks (avoids requiring BotService here, which
+	-- would create a load-order cycle).
+	self._botService = require(script.Parent.BotService)
 
 	self:_createArena()
 	self:_spawnFoodBatch(WormConfig.MaxFoodOnMap)
@@ -2534,6 +2581,11 @@ function WormService:KnitStart()
 		end
 
 		self._worms[player] = nil
+		-- Per-player rate-limit clocks: clear so we don't leak entries
+		-- keyed by leaving Players (Roblox keeps strong refs to Player
+		-- userdata via the table key).
+		self._lastDirSetTime[player] = nil
+		self._lastGrappleAttachTime[player] = nil
 
 		local trove = self._troves[player]
 		if trove then

@@ -282,11 +282,14 @@ function SandTideService:KnitStart()
 	TeamService = require(script.Parent.TeamService)
 	RoundService = require(script.Parent.RoundService)
 
-	-- Triangle edges are only relevant in Worm King mode; in solo mode the
-	-- sand tide doesn't run, so spawning the parts would just be clutter.
-	if TeamService and TeamService:IsEnabled() then
-		self:_createEdges()
-	end
+	-- Visible triangle barrier disabled by request — the damage logic in
+	-- _applyDamageTick (worms outside the inscribed triangle take HP/sec)
+	-- still runs when the sand tide is active, but no walls are drawn.
+	-- To re-enable, uncomment the block below:
+	--
+	-- if TeamService and TeamService:IsEnabled() then
+	--     self:_createEdges()
+	-- end
 
 	self._heartbeatConn = RunService.Heartbeat:Connect(function()
 		self:_update()

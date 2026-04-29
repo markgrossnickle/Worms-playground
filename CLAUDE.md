@@ -4,6 +4,16 @@ See [GAME.md](GAME.md) for game mechanics, architecture, and design details.
 
 This is a MindTrust Roblox project. It uses the Knit framework for service-oriented architecture.
 
+## CRITICAL: Grapple is a GHOST mechanic, NEVER a worm mechanic
+
+The grapple is **the ghost's traversal tool** — ghost right-clicks to fly toward a worm (and ride it) or to a ground point. **Alive worms cannot grapple, and never should.** Worms steer with the cursor and boost with shift/LMB; that's it.
+
+If you are about to wire grapple input or grapple visuals onto an alive-worm code path (anything gated by `self._alive == true and self._inGhostMode == false`), STOP. You have made a wrong turn.
+
+The single source of truth for grapple is the `_grappleState` machine in `src/ReplicatedStorage/Client/Controllers/WormController.luau` (states: `IDLE | TARGETING | PULLING | RIDING`), entered via `_onGhostGrapple` from `_setupGhostInput`. The visual styles in `src/ReplicatedStorage/Shared/GrappleStyles.luau` (selectable via the `grapple-style` cmdr) apply to **that** path and only that path.
+
+When the user reports "grapple has no visuals," the bug is in the ghost-grapple visual code, not in any alive-worm code. Do not introduce a parallel `_groundGrapple*` system on the worm side — that is the recurring mistake.
+
 ## Project Structure
 
 ```

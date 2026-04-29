@@ -9,7 +9,7 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local Signal = require(ReplicatedStorage.Packages.Signal)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
-local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
+local GrappleStyles = require(ReplicatedStorage.Shared.GrappleStyles)
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -79,6 +79,7 @@ local WormController = Knit.CreateController({
 	_grappleAttachment0 = nil :: Attachment?,
 	_grappleAttachment1 = nil :: Attachment?,
 	_grappleHighlight = nil :: Highlight?,
+	_grappleVisualTrove = nil :: any, -- Trove holding hook/anchor/light/beam/particles
 	_grapplePullStart = 0,
 	_grapplePullDuration = 0.3,
 	_grapplePullStartPos = nil :: Vector3?,
@@ -91,17 +92,6 @@ local WormController = Knit.CreateController({
 
 	-- Gamepad state
 	_gamepadThumbstick = Vector2.zero,
-
-	-- Ground grapple state (alive worm mode)
-	_groundGrappleActive = false,
-	_groundGrappleTarget = nil :: Vector3?,
-	_groundGrappleBeam = nil :: Beam?,
-	_groundGrappleAtt0 = nil :: Attachment?,
-	_groundGrappleAtt1 = nil :: Attachment?,
-	_groundGrappleAnchor = nil :: Part?,
-	_groundGrappleImpact = nil :: ParticleEmitter?,
-	_groundGrappleTrove = nil :: any,
-	_groundGrappleCooldownEnd = 0,
 })
 
 --------------------------------------------------
@@ -372,15 +362,6 @@ function WormController:_setupInput()
 
 	-- Keyboard/mouse boost: hold Shift or left mouse button (skip in ghost mode)
 	self._trove:Connect(UserInputService.InputBegan, function(input: InputObject, processed: boolean)
-		-- Ground grapple: right-click or E key when alive (works even if processed).
-		-- Must be checked BEFORE the ghost-mode early return so that grapple input
-		-- is never silently swallowed.
-		if self._alive and not self._inGhostMode then
-			if input.UserInputType == Enum.UserInputType.MouseButton2 or input.KeyCode == Enum.KeyCode.E then
-				self:_fireGroundGrapple()
-			end
-		end
-
 		if self._inGhostMode then
 			return
 		end
@@ -452,10 +433,6 @@ function WormController:_setupInput()
 		end
 		if input.KeyCode == Enum.KeyCode.ButtonR2 or input.KeyCode == Enum.KeyCode.ButtonA then
 			self:SetBoosting(true)
-		end
-		-- Gamepad ground grapple
-		if self._alive and input.KeyCode == Enum.KeyCode.ButtonX then
-			self:_fireGroundGrapple()
 		end
 	end)
 	self._trove:Connect(UserInputService.InputEnded, function(input: InputObject, _processed: boolean)
@@ -553,9 +530,6 @@ function WormController:_connectServerSignals()
 						end
 					end
 					self._lastDeathPosition = deathPos
-
-					-- Clean up ground grapple if active
-					self:_cleanupGroundGrapple()
 
 					local survivalTime = math.floor(os.clock() - self._spawnTime)
 					self._alive = false
@@ -681,7 +655,6 @@ function WormController:_connectServerSignals()
 
 	self._trove:Add(self._roundService.ForceSpectate:Connect(function()
 		self._alive = false
-		self:_cleanupGroundGrapple()
 		self:_setupCamera()
 		self:_autoSpectate()
 	end))
@@ -919,223 +892,6 @@ function WormController:_exitGhostMode()
 end
 
 --------------------------------------------------
--- Ground grapple (alive worm fast movement)
---------------------------------------------------
-
-function WormController:_getGroundGrappleTarget(): Vector3?
-	local character = LocalPlayer.Character
-	if not character then
-		return nil
-	end
-	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return nil
-	end
-
-	-- Use the same input + plane-intersection approach as _getWorldDirection
-	-- (which is proven to work for steering the worm every frame).
-	local screenX, screenY
-	if self._isTouchDevice and self._touchPosition then
-		screenX = self._touchPosition.X
-		screenY = self._touchPosition.Y
-	else
-		local mouse = LocalPlayer:GetMouse()
-		screenX = mouse.X
-		screenY = mouse.Y
-	end
-
-	local ray = Camera:ScreenPointToRay(screenX, screenY)
-	local planeY = hrp.Position.Y
-	if ray.Direction.Y == 0 then
-		return nil
-	end
-	local t = (planeY - ray.Origin.Y) / ray.Direction.Y
-	if t < 0 then
-		return nil
-	end
-
-	local hitPoint = ray.Origin + ray.Direction * t
-	local flatDist = ((hitPoint - hrp.Position) * Vector3.new(1, 0, 1)).Magnitude
-	if flatDist < 3 or flatDist > WormConfig.Grapple.Range then
-		return nil
-	end
-
-	return Vector3.new(
-		hitPoint.X,
-		TerrainHeight.getSmoothSurfaceY(hitPoint.X, hitPoint.Z) + WormConfig.SegmentSize / 2,
-		hitPoint.Z
-	)
-end
-
-function WormController:_fireGroundGrapple()
-	if not self._alive or self._inGhostMode then
-		return
-	end
-	if os.clock() < self._groundGrappleCooldownEnd then
-		return
-	end
-	if self._groundGrappleActive then
-		return
-	end
-
-	local target = self:_getGroundGrappleTarget()
-	if not target then
-		return
-	end
-
-	self._groundGrappleActive = true
-	self._groundGrappleTarget = target
-	self._groundGrappleCooldownEnd = os.clock() + WormConfig.Grapple.PullDuration + WormConfig.Grapple.Cooldown
-
-	-- Send to server
-	self._wormService:GrappleGround(target.X, target.Z)
-
-	-- Visual: beam from worm to target
-	local character = LocalPlayer.Character
-	if not character then
-		return
-	end
-	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return
-	end
-
-	-- Trove-based lifetime tracking for all grapple visuals
-	local grappleTrove = Trove.new()
-	self._groundGrappleTrove = grappleTrove
-
-	local GRAPPLE_COLOR = Color3.fromRGB(0, 200, 255)
-
-	-- Create anchor part at target (parented to workspace so it does NOT follow the worm)
-	local anchor = Instance.new("Part")
-	anchor.Name = "GrappleAnchor"
-	anchor.Size = Vector3.new(0.5, 0.5, 0.5)
-	anchor.Position = target
-	anchor.Anchored = true
-	anchor.CanCollide = false
-	anchor.CastShadow = false
-	anchor.Transparency = 0.5
-	anchor.Material = Enum.Material.Neon
-	anchor.Color = GRAPPLE_COLOR
-	anchor.Parent = workspace
-	self._groundGrappleAnchor = anchor
-	grappleTrove:Add(anchor)
-
-	local att0 = Instance.new("Attachment")
-	att0.Name = "GroundGrappleAtt0"
-	att0.Parent = hrp
-	self._groundGrappleAtt0 = att0
-	grappleTrove:Add(att0)
-
-	local att1 = Instance.new("Attachment")
-	att1.Name = "GroundGrappleAtt1"
-	att1.Parent = anchor
-	self._groundGrappleAtt1 = att1
-	grappleTrove:Add(att1)
-
-	-- Main rope/beam. Parent to workspace.Terrain so it renders regardless of
-	-- character streaming state and is guaranteed replicated/visible.
-	local beam = Instance.new("Beam")
-	beam.Name = "GroundGrappleBeam"
-	beam.Attachment0 = att0
-	beam.Attachment1 = att1
-	beam.Color = ColorSequence.new(GRAPPLE_COLOR)
-	beam.Width0 = 0.6
-	beam.Width1 = 0.6
-	beam.Segments = 10
-	beam.FaceCamera = true
-	beam.LightEmission = 1
-	beam.LightInfluence = 0
-	beam.Transparency = NumberSequence.new(0)
-	beam.CurveSize0 = 0
-	beam.CurveSize1 = 0
-	beam.Parent = workspace.Terrain
-	self._groundGrappleBeam = beam
-	grappleTrove:Add(beam)
-
-	-- Impact spark at the anchor point
-	local impact = Instance.new("ParticleEmitter")
-	impact.Name = "GroundGrappleImpact"
-	impact.Color = ColorSequence.new(GRAPPLE_COLOR)
-	impact.LightEmission = 1
-	impact.LightInfluence = 0
-	impact.Size = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.6),
-		NumberSequenceKeypoint.new(1, 0),
-	})
-	impact.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0),
-		NumberSequenceKeypoint.new(1, 1),
-	})
-	impact.Lifetime = NumberRange.new(0.2, 0.35)
-	impact.Speed = NumberRange.new(6, 12)
-	impact.SpreadAngle = Vector2.new(180, 180)
-	impact.Rotation = NumberRange.new(0, 360)
-	impact.Rate = 0
-	impact.Drag = 2
-	impact.Parent = anchor
-	impact:Emit(20)
-	self._groundGrappleImpact = impact
-	grappleTrove:Add(impact)
-
-	-- Pulse the beam width slightly for a more "alive" rope feel
-	local pullDuration = WormConfig.Grapple.PullDuration
-	local startClock = os.clock()
-	grappleTrove:Add(RunService.RenderStepped:Connect(function()
-		local elapsed = os.clock() - startClock
-		local t = elapsed / pullDuration
-		if t >= 1 then
-			-- Fade out near the end
-			local fadeT = math.clamp((elapsed - pullDuration) / 0.1, 0, 1)
-			beam.Transparency = NumberSequence.new(fadeT)
-			return
-		end
-		local pulse = 0.6 + math.sin(elapsed * 40) * 0.12
-		beam.Width0 = pulse
-		beam.Width1 = pulse
-	end))
-
-	-- Clean up after pull duration (+ short fade tail)
-	task.delay(pullDuration + 0.12, function()
-		self:_cleanupGroundGrapple()
-	end)
-end
-
-function WormController:_cleanupGroundGrapple()
-	self._groundGrappleActive = false
-	self._groundGrappleTarget = nil
-
-	-- Trove-based teardown: destroys beam, anchor, attachments, particles,
-	-- and disconnects the pulse RenderStepped connection in one shot.
-	if self._groundGrappleTrove then
-		self._groundGrappleTrove:Destroy()
-		self._groundGrappleTrove = nil
-	end
-
-	-- Defensive fallback cleanup in case anything slipped past the trove
-	if self._groundGrappleBeam then
-		self._groundGrappleBeam:Destroy()
-		self._groundGrappleBeam = nil
-	end
-	if self._groundGrappleImpact then
-		self._groundGrappleImpact:Destroy()
-		self._groundGrappleImpact = nil
-	end
-	if self._groundGrappleAtt0 then
-		self._groundGrappleAtt0:Destroy()
-		self._groundGrappleAtt0 = nil
-	end
-	if self._groundGrappleAtt1 then
-		self._groundGrappleAtt1:Destroy()
-		self._groundGrappleAtt1 = nil
-	end
-	if self._groundGrappleAnchor then
-		self._groundGrappleAnchor:Destroy()
-		self._groundGrappleAnchor = nil
-	end
-end
-
---------------------------------------------------
 -- Grapple mechanic (ghost mode only)
 --------------------------------------------------
 
@@ -1245,47 +1001,157 @@ function WormController:_updateGrappleHighlight(wormHead: BasePart?, wormModel: 
 	end
 end
 
+-- Build the ghost-grapple visual: a straight rope that connects the ghost's
+-- chest to the target, instantly. No fly-out animation — the line just
+-- appears at full length on right-click, the same way a laser shot reads.
+-- Particle bursts fire at both endpoints simultaneously to suggest the
+-- "shoot out" moment; the existing pull lerp in _updateGrapplePull then
+-- reels the ghost in along the visible rope.
+--
+-- Why no animated tip: a tip Part interpolating linearly through 3D from
+-- ghost-height down to ground-target-height visibly dips through terrain
+-- when the camera angle is non-trivial, AND with FaceCamera=true the quad
+-- orientation goes unstable when one attachment is right at the camera
+-- (the ghost's HRP is essentially the camera in first-person). Both
+-- problems disappear when the beam is full-length from the start.
+--
+-- This is PURELY visual. The PULLING → RIDING → IDLE state machine and
+-- the per-frame ghost lerp in _updateGrapplePull are untouched.
 function WormController:_createBeam(fromPart: BasePart, toPart: BasePart)
-	-- Clean up old beam
+	-- Clean up old visual
 	self:_cleanupBeam()
 
+	local style = GrappleStyles.getCurrent()
+	local color = style.Color
+
+	-- One Trove for the whole visual; _cleanupBeam destroys it in one shot.
+	local trove = Trove.new()
+	self._grappleVisualTrove = trove
+
+	-- att0 is offset 2 studs forward and 1 stud down in HRP-local space, so
+	-- the rope visibly emerges from the ghost's chest rather than from
+	-- inside their head/camera. This also keeps att0's world position
+	-- meaningfully separated from the camera, which avoids a FaceCamera
+	-- quad-orientation degeneracy that produces the "flicker" artifact.
 	local att0 = Instance.new("Attachment")
 	att0.Name = "GrappleAtt0"
+	att0.Position = Vector3.new(0, -1, -2)
 	att0.Parent = fromPart
 	self._grappleAttachment0 = att0
+	trove:Add(att0)
 
-	local att1 = Instance.new("Attachment")
-	att1.Name = "GrappleAtt1"
-	att1.Parent = toPart
-	self._grappleAttachment1 = att1
+	local toAtt = Instance.new("Attachment")
+	toAtt.Name = "GrappleAtt1"
+	toAtt.Parent = toPart
+	self._grappleAttachment1 = toAtt
+	trove:Add(toAtt)
 
+	-- Beam — straight rope, no curve sag, no fly-out. CurveSize=0 means a
+	-- direct line between the two attachments; Segments=1 keeps it a
+	-- single quad. FaceCamera=true rotates the quad to face the camera
+	-- each frame, which is required for a single straight quad to be
+	-- visible from arbitrary angles — without it the quad's normal is
+	-- determined by the attachments' (default-identity) orientation and
+	-- usually ends up edge-on to the camera.
+	--
+	-- Parent to toPart (worm head or transparent ground anchor Part). Both
+	-- are workspace descendants that aren't part of the local ghost
+	-- character, so first-person rendering won't cull them.
 	local beam = Instance.new("Beam")
 	beam.Name = "GrappleBeam"
+	beam.Enabled = true
 	beam.Attachment0 = att0
-	beam.Attachment1 = att1
-	beam.Color = ColorSequence.new(Color3.fromRGB(0, 180, 255))
-	beam.Width0 = 0.3
-	beam.Width1 = 0.3
+	beam.Attachment1 = toAtt
+	beam.Color = ColorSequence.new(color)
+	-- Minimum width 0.35 — thin enough to read as a rope, not a pipe, but
+	-- not a hairline at far range. Style WidthFire ranges 0.3-1.2; this
+	-- floor only kicks in for `zipline` (0.30 → 0.35).
+	local fireWidth = math.max(style.WidthFire, 0.35)
+	beam.Width0 = fireWidth
+	beam.Width1 = fireWidth
+	beam.Segments = 1
 	beam.FaceCamera = true
-	beam.LightEmission = 0.8
-	beam.Transparency = NumberSequence.new(0.2)
-	beam.Parent = fromPart
+	beam.LightEmission = 1
+	beam.LightInfluence = 0
+	beam.Transparency = NumberSequence.new(0)
+	beam.CurveSize0 = 0
+	beam.CurveSize1 = 0
+	beam.Parent = toPart
 	self._grappleBeam = beam
+	trove:Add(beam)
+
+	-- Particle bursts at both ends, emitted immediately. Anchor burst at
+	-- the target sells the "rope hit something" moment; source burst at
+	-- the ghost sells the "you fired" moment. Counts come from the style.
+	local impactBurst = Instance.new("ParticleEmitter")
+	impactBurst.Name = "GrappleImpactBurst"
+	impactBurst.Color = ColorSequence.new(color)
+	impactBurst.LightEmission = 1
+	impactBurst.LightInfluence = 0
+	impactBurst.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.9),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	impactBurst.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	impactBurst.Lifetime = NumberRange.new(0.25, 0.45)
+	impactBurst.Speed = NumberRange.new(10, 22)
+	impactBurst.SpreadAngle = Vector2.new(180, 180)
+	impactBurst.Rotation = NumberRange.new(0, 360)
+	impactBurst.Rate = 0
+	impactBurst.Drag = 2
+	impactBurst.Parent = toPart
+	trove:Add(impactBurst)
+	impactBurst:Emit(style.AnchorBurst)
+
+	local sourceBurst = Instance.new("ParticleEmitter")
+	sourceBurst.Name = "GrappleSourceBurst"
+	sourceBurst.Color = ColorSequence.new(color)
+	sourceBurst.LightEmission = 1
+	sourceBurst.LightInfluence = 0
+	sourceBurst.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.6),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	sourceBurst.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	sourceBurst.Lifetime = NumberRange.new(0.2, 0.35)
+	sourceBurst.Speed = NumberRange.new(8, 16)
+	sourceBurst.SpreadAngle = Vector2.new(180, 180)
+	sourceBurst.Rotation = NumberRange.new(0, 360)
+	sourceBurst.Rate = 0
+	sourceBurst.Drag = 2
+	sourceBurst.Parent = fromPart
+	trove:Add(sourceBurst)
+	sourceBurst:Emit(style.WormBurst)
+
+	-- Width morphs WidthFire → WidthPull as the ghost reels in (purely
+	-- visual; the actual reel-in is the pull lerp in _updateGrapplePull).
+	local pullDur = math.max(style.PullDuration, 0.15)
+	local startClock = os.clock()
+	trove:Add(RunService.RenderStepped:Connect(function()
+		local elapsed = os.clock() - startClock
+		local t = math.clamp(elapsed / pullDur, 0, 1)
+		local pullWidth = math.max(style.WidthPull, 0.25)
+		local w = fireWidth + (pullWidth - fireWidth) * t
+		beam.Width0 = w
+		beam.Width1 = w
+	end))
 end
 
 function WormController:_cleanupBeam()
-	if self._grappleBeam then
-		self._grappleBeam:Destroy()
-		self._grappleBeam = nil
+	if self._grappleVisualTrove then
+		self._grappleVisualTrove:Destroy()
+		self._grappleVisualTrove = nil
 	end
-	if self._grappleAttachment0 then
-		self._grappleAttachment0:Destroy()
-		self._grappleAttachment0 = nil
-	end
-	if self._grappleAttachment1 then
-		self._grappleAttachment1:Destroy()
-		self._grappleAttachment1 = nil
-	end
+	-- Clear cached references (the trove already destroyed the instances)
+	self._grappleBeam = nil
+	self._grappleAttachment0 = nil
+	self._grappleAttachment1 = nil
 end
 
 function WormController:_startGrapplePull(targetHead: BasePart, targetModel: Model)
@@ -1594,14 +1460,12 @@ function WormController:IsFreeCamActive(): boolean
 end
 
 -- Public wrapper so touch/mobile UI (e.g. on-screen Grapple button in
--- WormUIController) can trigger the grapple without duplicating the "ghost vs
--- alive" dispatch that the keyboard/mouse handlers do. Desktop keeps using
--- RMB / E / X for alive worms and RMB / L2 for ghost worms.
+-- WormUIController) can trigger the ghost grapple. Grapple is a ghost-only
+-- mechanic — alive worms cannot grapple — so this is a no-op when the player
+-- isn't currently a ghost.
 function WormController:FireGrapple()
 	if self._inGhostMode then
 		self:_onGhostGrapple()
-	elseif self._alive then
-		self:_fireGroundGrapple()
 	end
 end
 

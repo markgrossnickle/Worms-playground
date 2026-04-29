@@ -43,7 +43,13 @@ local RoundService = Knit.CreateService({
 	_roundStartTime = 0 :: number, -- os.clock() at _startRound; used for respawn lockout
 	_matchPhase = "Active" :: string, -- "Active" | "Lockdown"
 	_eliminationOrder = {} :: { EliminationEntry },
-	_pollConnection = nil :: RBXScriptConnection?,
+	-- task.spawn returns a `thread`, not an RBXScriptConnection — typing it
+	-- correctly so future readers don't try to `:Disconnect()` it.
+	_pollConnection = nil :: thread?,
+	-- Idempotency guard for _endRound: the win-condition poll, server timer,
+	-- and forced-end paths can all race to call _endRound. Without this flag
+	-- the cleanup runs twice and fires duplicate end-of-round signals.
+	_endingRound = false,
 	_winningTeamIndex = nil :: number?,
 })
 
@@ -73,6 +79,7 @@ end
 function RoundService:_startRound()
 	self._eliminationOrder = {}
 	self._roundActive = true
+	self._endingRound = false -- reset idempotency flag for the new round
 	self._roundStartTime = os.clock()
 	self._matchPhase = "Active"
 	self._winningTeamIndex = nil
@@ -236,7 +243,22 @@ function RoundService:_startMatchTimer()
 end
 
 function RoundService:_endRound()
+	-- Idempotency: the win-condition poll, the duration timer, and the
+	-- forced-end path can all race here. Without this guard the cleanup
+	-- runs twice and end-of-round signals fire duplicates.
+	if self._endingRound or not self._roundActive then
+		return
+	end
+	self._endingRound = true
 	self._roundActive = false
+
+	-- Cancel the win-condition poll thread immediately so it can't fire a
+	-- second _endRound between here and our own re-entry into Active.
+	if self._pollConnection then
+		task.cancel(self._pollConnection)
+		self._pollConnection = nil
+	end
+
 	WormService:SetRoundActive(false)
 	BotService:SetRoundActive(false)
 	-- Worm King: hide Crown until next round

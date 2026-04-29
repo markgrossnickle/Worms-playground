@@ -2,7 +2,11 @@
 
 return {
 	-- Arena
-	ArenaSize = 1200,
+	-- 800 stud square: half-arena 400, team-base circumradius 320, ~640 studs
+	-- between bases, ~13s to traverse at base speed. Tight enough that
+	-- engagement happens often but big enough that a 24-bot round doesn't
+	-- feel claustrophobic.
+	ArenaSize = 800,
 
 	-- Movement
 	BaseSpeed = 30,

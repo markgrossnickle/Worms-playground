@@ -10,7 +10,6 @@ local Knit = require(ReplicatedStorage.Packages.Knit)
 local Trove = require(ReplicatedStorage.Packages.Trove)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local PlatformUtil = require(ReplicatedStorage.Shared.PlatformUtil)
-local TeamBase = require(ReplicatedStorage.Shared.TeamBase)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -51,6 +50,7 @@ local WormUIController = Knit.CreateController({
 	_killFeedFrame = nil :: Frame?,
 	_minimapFrame = nil :: Frame?,
 	_minimapArrow = nil :: Frame?,
+	_minimapCoordLabel = nil :: TextLabel?,
 	_boostButton = nil :: ImageButton?,
 	_grappleButton = nil :: ImageButton?,
 	_powerUpFrame = nil :: Frame?,
@@ -884,6 +884,40 @@ function WormUIController:_buildMinimap(parent: ScreenGui)
 	tipCorner.Parent = tip
 
 	self._minimapArrow = arrow
+
+	-- Debug aid: "N" compass label pinned to the top of the minimap. If the
+	-- minimap orientation is correct, the N label should align with the
+	-- world direction the player treats as "north" (whichever axis that is).
+	local compassN = Instance.new("TextLabel")
+	compassN.Name = "CompassN"
+	compassN.Size = UDim2.new(0, 16, 0, 16)
+	compassN.Position = UDim2.new(0.5, 0, 0, 2)
+	compassN.AnchorPoint = Vector2.new(0.5, 0)
+	compassN.BackgroundTransparency = 1
+	compassN.Text = "N"
+	compassN.TextColor3 = Color3.fromRGB(255, 220, 120)
+	compassN.TextStrokeTransparency = 0.3
+	compassN.TextScaled = true
+	compassN.Font = Enum.Font.GothamBold
+	compassN.ZIndex = 13
+	compassN.Parent = frame
+
+	-- Debug aid: live world X,Z readout pinned to the bottom of the minimap.
+	-- Lets us confirm the mapping matches the actual world position.
+	local coordLabel = Instance.new("TextLabel")
+	coordLabel.Name = "CoordDebug"
+	coordLabel.Size = UDim2.new(1, -4, 0, 14)
+	coordLabel.Position = UDim2.new(0.5, 0, 1, -2)
+	coordLabel.AnchorPoint = Vector2.new(0.5, 1)
+	coordLabel.BackgroundTransparency = 1
+	coordLabel.Text = "x=0 z=0"
+	coordLabel.TextColor3 = Color3.fromRGB(200, 220, 255)
+	coordLabel.TextStrokeTransparency = 0.3
+	coordLabel.TextScaled = true
+	coordLabel.Font = Enum.Font.Code
+	coordLabel.ZIndex = 13
+	coordLabel.Parent = frame
+	self._minimapCoordLabel = coordLabel
 
 	-- Shift minimap up on touch devices to make room for boost button
 	if UserInputService.TouchEnabled then
@@ -1739,6 +1773,12 @@ function WormUIController:_updateMinimapArrow()
 		return
 	end
 
+	-- Debug coord readout: raw world X,Z so we can cross-check minimap orientation.
+	if self._minimapCoordLabel then
+		self._minimapCoordLabel.Text =
+			string.format("x=%d z=%d", math.floor(hrp.Position.X), math.floor(hrp.Position.Z))
+	end
+
 	if not arrow.Visible then
 		arrow.Visible = true
 	end
@@ -1846,55 +1886,8 @@ function WormUIController:_worldToMinimapScale(worldPos: Vector3): (number, numb
 	end
 end
 
--- Worm King: draw the sand tide triangle (3 edges) on the minimap at the current scale.
--- Each edge is a thin UDim2-based Frame rotated to connect two minimap-space vertices.
-function WormUIController:_drawMinimapTriangle(minimap: Frame, scale: number)
-	-- Compute world-space scaled vertices, then convert each to minimap fraction.
-	local vs = TeamBase.getScaledVertices(scale)
-	local mw = minimap.AbsoluteSize.X
-	local mh = minimap.AbsoluteSize.Y
-	if mw <= 0 or mh <= 0 then
-		return
-	end
-	local pts: { { x: number, y: number } } = {}
-	for _, v in vs do
-		local mx, my = self:_worldToMinimapScale(v)
-		table.insert(pts, { x = mx * mw, y = my * mh })
-	end
-
-	-- Edge color: orange (warning) when past the first contraction threshold, red when close to min.
-	local edgeColor = Color3.fromRGB(255, 180, 50)
-	if scale <= 0.35 then
-		edgeColor = Color3.fromRGB(255, 60, 60)
-	elseif scale >= 0.9 then
-		edgeColor = Color3.fromRGB(255, 220, 120)
-	end
-
-	for i = 1, 3 do
-		local a = pts[i]
-		local b = pts[(i % 3) + 1]
-		local dx = b.x - a.x
-		local dy = b.y - a.y
-		local length = math.sqrt(dx * dx + dy * dy)
-		if length < 1 then
-			continue
-		end
-		local angle = math.deg(math.atan2(dy, dx))
-		local midX = (a.x + b.x) * 0.5
-		local midY = (a.y + b.y) * 0.5
-
-		local edge = Instance.new("Frame")
-		edge.Name = "TideEdge"
-		edge.AnchorPoint = Vector2.new(0.5, 0.5)
-		edge.Position = UDim2.fromOffset(midX, midY)
-		edge.Size = UDim2.fromOffset(length, 2)
-		edge.Rotation = angle
-		edge.BackgroundColor3 = edgeColor
-		edge.BorderSizePixel = 0
-		edge.ZIndex = 6
-		edge.Parent = minimap
-	end
-end
+-- (`_drawMinimapTriangle` removed — the sand tide triangle is no longer
+--  drawn on the minimap; see the call site in `_updateMinimap`.)
 
 function WormUIController:_updateMinimap()
 	local minimap = self._minimapFrame
@@ -2002,11 +1995,10 @@ function WormUIController:_updateMinimap()
 		end
 	end
 
-	-- Worm King: sand tide triangle edges. Draw the 3 scaled vertices connected
-	-- by thin rotated Frames so players see the contracting playable area.
-	if self._teamModeActive then
-		self:_drawMinimapTriangle(minimap, self._sandTideScale)
-	end
+	-- Sand tide triangle removed from the minimap by request — the in-world
+	-- triangle barrier is also gone (see SandTideService:KnitStart). Damage
+	-- still applies based on triangle geometry, but there is no visual cue
+	-- for the safe zone on either the map or the minimap.
 
 	-- Worm King: Crown marker (gold dot). Read position directly from the workspace
 	-- Crown Part (auto-replicated at 10Hz by the server). Hidden while Inactive —
