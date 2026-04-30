@@ -384,17 +384,18 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 			-- Check if we hit another ghost (ghosts do not allow pierce-through)
 			if not pierced and hitModel:GetAttribute("IsGhost") then
 				local ghostOwnerName = hitModel:GetAttribute("GhostOwner")
-				if ghostOwnerName and ghostOwnerName ~= player.Name then
-					hitPlayerName = ghostOwnerName .. " (ghost)"
 
-					-- Find the ghost owner player
-					local ghostOwner: Player? = nil
-					for _, p in Players:GetPlayers() do
-						if p.Name == ghostOwnerName then
-							ghostOwner = p
-							break
-						end
-					end
+				-- Bot ghosts: NPC, no Player owner. Despawn instantly on
+				-- hit (glass mooks). The IsBotGhost attribute distinguishes
+				-- them from player ghosts.
+				if hitModel:GetAttribute("IsBotGhost") then
+					hitPlayerName = (ghostOwnerName or hitModel.Name) .. " (ghost)"
+					BotService:KillBotGhostByModel(hitModel)
+					self.Client.HitConfirmed:Fire(player, hitPlayerName, 0)
+				elseif ghostOwnerName and ghostOwnerName ~= player.Name then
+					-- Player ghost: knockoff if riding, knockback otherwise.
+					hitPlayerName = ghostOwnerName .. " (ghost)"
+					local ghostOwner: Player? = Players:FindFirstChild(ghostOwnerName) :: Player?
 
 					if ghostOwner then
 						-- Check if ghost is riding a worm

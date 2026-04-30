@@ -133,21 +133,29 @@ type BotData = {
 -- Bot ghost: NPC version of a player ghost. Spawns when a bot worm dies
 -- so there's visible activity outside the alive-worm population.
 --
--- Movement: anchored HRP + manual CFrame updates (no Humanoid simulation).
--- We tried unanchored Humanoid + MoveTo first, but the minimal R6 rig
--- (no arms/legs) doesn't give the Humanoid enough info to balance —
--- the model would tip over and slide. Anchored + manual is reliable and
--- matches the approach the worm head uses.
+-- Built from real catalog avatars via `Players:CreateHumanoidModelFromUserId`
+-- so they look like normal Roblox players, not glowing blocks. We cache
+-- one template per UserId at server start and Clone() per spawn — the
+-- yielding catalog load happens once.
+--
+-- Movement: standard unanchored Humanoid + Humanoid:MoveTo. The full R6
+-- rig has legs/arms so balance works (the prior minimal HRP-only rig
+-- couldn't balance and tipped over). HRP:SetNetworkOwner(nil) keeps the
+-- server authoritative for physics so a nearby player can't hijack
+-- simulation of the ghost.
 type BotGhostData = {
 	Name: string,
-	Model: Model,
-	HRP: BasePart,
+	Model: Model?, -- nil while async-loading
+	Humanoid: Humanoid?, -- nil if avatar load failed (fallback rig)
+	HRP: BasePart?,
 	Color: Color3,
 	TeamIndex: number, -- 0 if no team (solo / FFA)
 	State: string,
-	-- Manual movement: store target world position; advance HRP toward it
-	-- at WalkSpeed each tick. When close, pick a new target.
+	-- Cached current target. With Humanoid we re-issue MoveTo every ~1s
+	-- (Humanoid MoveTo has an 8s internal timeout); without (fallback rig)
+	-- we manually advance the model toward this each frame.
 	MoveTarget: Vector3,
+	LastMoveTo: number,
 	NextWanderPick: number,
 	DespawnAt: number,
 }
@@ -162,6 +170,10 @@ local BotService = Knit.CreateService({
 	_roundActive = false,
 	_roundBotStats = {} :: { [string]: { Kills: number, MaxSegments: number } },
 	_broadcastTick = 0,
+	-- Avatar template cache: one Model per UserId, parented to nil. Each
+	-- ghost spawn Clones() one. Pre-warmed at KnitStart so the catalog
+	-- yield happens once at game start, not on every bot death.
+	_avatarTemplateCache = {} :: { [number]: Model },
 
 	BotKilled = Signal.new(),
 })
@@ -577,11 +589,130 @@ end
 -- Bot ghosts (NPC ghost AI)
 --------------------------------------------------
 
--- Build a minimal anchored ghost model — no Humanoid (we drive movement
--- manually). Visible head (neon ball) + torso block, point light, wisp
--- particles, name billboard. HRP is invisible and acts as the assembly
--- anchor; we Pivot the model around it.
-function BotService:_buildBotGhostModel(name: string, color: Color3): (Model, BasePart)
+-- Get a cloned avatar Model for the given UserId. If the UserId hasn't
+-- been loaded yet, fetch it via the catalog (yields) and stash the
+-- original under nil parent. Subsequent calls Clone() instead of
+-- re-fetching. Returns nil on catalog failure (caller falls back to the
+-- minimal block rig).
+function BotService:_getAvatarTemplate(userId: number): Model?
+	local cached = self._avatarTemplateCache[userId]
+	if cached then
+		return cached:Clone()
+	end
+	local ok, result = pcall(function()
+		return Players:CreateHumanoidModelFromUserId(userId)
+	end)
+	if not ok or not result then
+		return nil
+	end
+	-- Keep the canonical copy out of workspace; clone for return.
+	result.Parent = nil
+	self._avatarTemplateCache[userId] = result
+	return result:Clone()
+end
+
+-- Pre-warm the cache at server start in parallel — the first wave of bot
+-- deaths shouldn't pay catalog yield latency.
+function BotService:_prewarmAvatarCache()
+	for _, id in BOT_AVATAR_IDS do
+		task.spawn(function()
+			-- Pre-fetch but discard the clone; we only want the canonical
+			-- template populated for later cloning.
+			local template = self:_getAvatarTemplate(id)
+			if template then
+				template:Destroy()
+			end
+		end)
+	end
+end
+
+-- Build a real avatar ghost from a catalog Roblox character. R6/R15 rig
+-- with proper arms/legs so Humanoid balance works, IsGhost / IsBotGhost
+-- attributes set so weapon hits + ghost-eat both apply, name billboard
+-- on the head, optional team-color outline. Returns (model, humanoid,
+-- hrp) or (nil, nil, nil) if the catalog fetch failed.
+function BotService:_buildBotGhostFromAvatar(
+	name: string,
+	teamColor: Color3,
+	teamIndex: number
+): (Model?, Humanoid?, BasePart?)
+	local avatarId = BOT_AVATAR_IDS[math.random(1, #BOT_AVATAR_IDS)]
+	local model = self:_getAvatarTemplate(avatarId)
+	if not model then
+		return nil, nil, nil
+	end
+
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	local hrp = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not humanoid or not hrp then
+		model:Destroy()
+		return nil, nil, nil
+	end
+
+	model.Name = name
+	model:SetAttribute("IsGhost", true)
+	model:SetAttribute("IsBotGhost", true)
+	model:SetAttribute("GhostOwner", name)
+
+	humanoid.WalkSpeed = WormConfig.Ghost.WalkSpeed * 0.7
+	humanoid.JumpPower = 0
+	humanoid.MaxHealth = math.huge
+	humanoid.Health = math.huge
+	humanoid.BreakJointsOnDeath = false
+	humanoid.AutoRotate = true
+
+	-- Disable collisions on body parts so ghosts pass through worms / each
+	-- other without physics fights. Keep CanQuery so the weapon raycast
+	-- can hit them. HRP keeps default CanCollide for ground detection.
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+			part.CanCollide = false
+			part.CanQuery = true
+		end
+	end
+
+	-- Team-color outline so you can read which team's ghost it is at a
+	-- glance. Subtle — outline only, no fill — preserves the avatar look.
+	if teamIndex > 0 then
+		local highlight = Instance.new("Highlight")
+		highlight.Name = "BotGhostTeamOutline"
+		highlight.FillTransparency = 1
+		highlight.OutlineColor = teamColor
+		highlight.OutlineTransparency = 0
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight.Parent = model
+	end
+
+	-- Name billboard on the head
+	local head = model:FindFirstChild("Head") :: BasePart?
+	if head then
+		local billboard = Instance.new("BillboardGui")
+		billboard.Name = "BotGhostName"
+		billboard.Size = UDim2.fromOffset(120, 24)
+		billboard.StudsOffset = Vector3.new(0, 2.4, 0)
+		billboard.AlwaysOnTop = true
+		billboard.LightInfluence = 0
+		billboard.Parent = head
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.fromScale(1, 1)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 14
+		label.Text = name
+		label.TextColor3 = if teamIndex > 0 then teamColor else Color3.fromRGB(220, 220, 220)
+		label.TextStrokeTransparency = 0.2
+		label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+		label.Parent = billboard
+	end
+
+	return model, humanoid, hrp
+end
+
+-- Fallback: minimal anchored block rig. Used only if the catalog avatar
+-- load fails (offline / rate-limited Studio testing). Visible head (neon
+-- ball) + torso block, name billboard. HRP is invisible.
+function BotService:_buildBotGhostFallback(name: string, color: Color3): (Model, BasePart)
 	local ghostConfig = WormConfig.Ghost
 	local model = Instance.new("Model")
 	model.Name = name
@@ -697,7 +828,7 @@ function BotService:_spawnBotGhost(name: string, deathPos: Vector3, color: Color
 		return
 	end
 
-	-- Use team color for the ghost if we're in team mode and have a team.
+	-- Use team color for highlight if we're in team mode and have a team.
 	local ghostColor = color
 	if TeamService and TeamService:IsEnabled() and teamIndex > 0 then
 		local teamColor = TeamService:GetTeamColor(teamIndex)
@@ -706,42 +837,82 @@ function BotService:_spawnBotGhost(name: string, deathPos: Vector3, color: Color
 		end
 	end
 
-	local model, hrp = self:_buildBotGhostModel(name, ghostColor)
-
-	-- Anchored manual movement: position the rig around the death point,
-	-- ~3 studs off the ground so it doesn't clip terrain.
-	local spawnY = TerrainHeight.getSurfaceY(deathPos.X, deathPos.Z) + 3
-	model:PivotTo(CFrame.new(deathPos.X, spawnY, deathPos.Z))
-	model.Parent = workspace
-
-	-- Pick an immediate wander target so the ghost starts moving on frame 1.
+	-- Reserve the slot synchronously so concurrent calls during the async
+	-- avatar load don't double-spawn. Fields filled in once load completes.
 	local angle = math.random() * math.pi * 2
-	local target = Vector3.new(deathPos.X + math.cos(angle) * 12, spawnY, deathPos.Z + math.sin(angle) * 12)
-
-	self._botGhosts[name] = {
+	local initialTarget = Vector3.new(deathPos.X + math.cos(angle) * 12, deathPos.Y, deathPos.Z + math.sin(angle) * 12)
+	local data: BotGhostData = {
 		Name = name,
-		Model = model,
-		HRP = hrp,
+		Model = nil,
+		Humanoid = nil,
+		HRP = nil,
 		Color = ghostColor,
 		TeamIndex = teamIndex,
-		State = "Alive",
-		MoveTarget = target,
+		State = "Loading",
+		MoveTarget = initialTarget,
+		LastMoveTo = 0,
 		NextWanderPick = os.clock() + 1.5 + math.random() * 1.5,
 		DespawnAt = os.clock() + BOT_GHOST_LIFETIME,
 	}
+	self._botGhosts[name] = data
 
-	print(
-		string.format(
-			"[bot-ghost] spawned %s at (%.0f, %.0f) team=%d color=(%d,%d,%d)",
-			name,
-			deathPos.X,
-			deathPos.Z,
-			teamIndex,
-			math.floor(ghostColor.R * 255),
-			math.floor(ghostColor.G * 255),
-			math.floor(ghostColor.B * 255)
+	-- Async build: avatar load yields. Use task.spawn so we don't block
+	-- the Heartbeat that called us.
+	task.spawn(function()
+		local model, humanoid, hrp = self:_buildBotGhostFromAvatar(name, ghostColor, teamIndex)
+		local usedFallback = false
+		if not model then
+			model, hrp = self:_buildBotGhostFallback(name, ghostColor)
+			usedFallback = true
+		end
+
+		-- Round may have ended OR ghost may have been despawned (e.g. shot
+		-- and killed) while the catalog load was in flight. Respect the
+		-- new state.
+		if not self._roundActive or not self._botGhosts[name] or self._botGhosts[name] ~= data then
+			if model then
+				model:Destroy()
+			end
+			if self._botGhosts[name] == data then
+				self._botGhosts[name] = nil
+			end
+			return
+		end
+
+		local spawnY = TerrainHeight.getSurfaceY(deathPos.X, deathPos.Z) + 3
+		if hrp then
+			hrp.CFrame = CFrame.new(deathPos.X, spawnY, deathPos.Z)
+		else
+			(model :: Model):PivotTo(CFrame.new(deathPos.X, spawnY, deathPos.Z))
+		end
+		(model :: Model).Parent = workspace
+
+		-- Lock physics authority to server. Without this, an unanchored
+		-- Humanoid auto-assigns network ownership to the nearest player
+		-- — that client could then desync the ghost.
+		if hrp and hrp.Anchored == false then
+			pcall(function()
+				hrp:SetNetworkOwner(nil)
+			end)
+		end
+
+		data.Model = model
+		data.Humanoid = humanoid
+		data.HRP = hrp
+		data.MoveTarget = Vector3.new(initialTarget.X, spawnY, initialTarget.Z)
+		data.State = "Alive"
+
+		print(
+			string.format(
+				"[bot-ghost] spawned %s at (%.0f, %.0f) team=%d %s",
+				name,
+				deathPos.X,
+				deathPos.Z,
+				teamIndex,
+				if usedFallback then "(fallback rig)" else "(avatar)"
+			)
 		)
-	)
+	end)
 end
 
 function BotService:_despawnBotGhost(name: string)
@@ -761,14 +932,38 @@ function BotService:_despawnAllBotGhosts()
 	end
 end
 
+-- Public: kill a bot ghost by its Model. Called by WeaponService when a
+-- shot raycast hits a Model with the IsBotGhost attribute. The ghost
+-- despawns instantly (no HP / phased death — they're just easy targets,
+-- like glass mooks) and the GhostEaten signal fires so clients show the
+-- standard poof effect.
+function BotService:KillBotGhostByModel(model: Model)
+	if not model then
+		return
+	end
+	-- Look up by name — bot ghosts are keyed by their model name in
+	-- _botGhosts, and the IsBotGhost attribute is set on the model.
+	local data = self._botGhosts[model.Name]
+	if not data then
+		return
+	end
+	local hrp = data.HRP
+	if hrp and WormService and WormService.Client and WormService.Client.GhostEaten then
+		WormService.Client.GhostEaten:FireAll(hrp.Position, "")
+	end
+	self:_despawnBotGhost(data.Name)
+end
+
 -- Walking speed of bot ghosts (studs/sec). 70% of player ghost walk speed.
 local BOT_GHOST_WALK_SPEED = WormConfig.Ghost.WalkSpeed * 0.7
 
 -- Per-tick AI: pick a wander target every few seconds (or pursue the
--- closest enemy worm if one is within 40 studs), and advance the model
--- toward MoveTarget at BOT_GHOST_WALK_SPEED * dt. Anchored manual movement
--- — no Humanoid simulation, no balance issues, server-authoritative.
+-- closest enemy worm if one is within 40 studs). When the avatar rig has
+-- a Humanoid, drive movement via Humanoid:MoveTo (physics-driven walking
+-- + standard Roblox run animation). When fallback rig (no Humanoid),
+-- manually advance the model toward MoveTarget via PivotTo.
 function BotService:_updateBotGhostAI(data: BotGhostData, now: number, dt: number)
+	-- Skip if still loading (catalog avatar fetch in flight)
 	if data.State ~= "Alive" then
 		return
 	end
@@ -779,13 +974,15 @@ function BotService:_updateBotGhostAI(data: BotGhostData, now: number, dt: numbe
 		return
 	end
 
-	-- Skip if model invalidated (e.g. workspace stream-out)
-	if not data.Model.Parent or not data.HRP.Parent then
+	-- Skip if model invalidated (e.g. workspace stream-out, weapon hit kill)
+	local model = data.Model
+	local hrp = data.HRP
+	if not model or not model.Parent or not hrp or not hrp.Parent then
 		self:_despawnBotGhost(data.Name)
 		return
 	end
 
-	local pos = data.HRP.Position
+	local pos = hrp.Position
 
 	-- Pursue: closest enemy worm within 40 studs (player or bot).
 	local closestEnemyPos: Vector3? = nil
@@ -832,24 +1029,30 @@ function BotService:_updateBotGhostAI(data: BotGhostData, now: number, dt: numbe
 		data.NextWanderPick = now + 2 + math.random() * 2
 	end
 
-	-- Advance toward MoveTarget by WalkSpeed * dt. Cap step at the
-	-- distance remaining so we don't overshoot.
-	local toTarget = data.MoveTarget - pos
-	local toTargetFlat = Vector3.new(toTarget.X, 0, toTarget.Z)
-	local remaining = toTargetFlat.Magnitude
-	if remaining > 0.05 then
-		local step = math.min(BOT_GHOST_WALK_SPEED * dt, remaining)
-		local dir = toTargetFlat.Unit
-		local newX = pos.X + dir.X * step
-		local newZ = pos.Z + dir.Z * step
-		-- Sit on the terrain surface — the ghost should track terrain
-		-- height as it walks (matches the worm's surface-following).
-		local newY = TerrainHeight.getSurfaceY(newX, newZ) + 3
-		-- PivotTo updates HRP + Head + Torso together (all are anchored
-		-- siblings under the model). Face the direction of travel so the
-		-- name billboard reads correctly.
-		local lookCFrame = CFrame.new(Vector3.new(newX, newY, newZ), Vector3.new(newX + dir.X, newY, newZ + dir.Z))
-		data.Model:PivotTo(lookCFrame)
+	if data.Humanoid then
+		-- Avatar with Humanoid: re-issue MoveTo every ~1s. Humanoid:MoveTo
+		-- has an 8-second internal timeout; refreshing keeps the walk
+		-- animation playing and tracks moving targets correctly.
+		if now - data.LastMoveTo > 1 then
+			data.Humanoid:MoveTo(data.MoveTarget)
+			data.LastMoveTo = now
+		end
+	else
+		-- Fallback rig: manually advance toward MoveTarget. Cap step at
+		-- the distance remaining so we don't overshoot. Track terrain Y
+		-- so the ghost walks up hills cleanly. Face direction of travel.
+		local toTarget = data.MoveTarget - pos
+		local toTargetFlat = Vector3.new(toTarget.X, 0, toTarget.Z)
+		local remaining = toTargetFlat.Magnitude
+		if remaining > 0.05 then
+			local step = math.min(BOT_GHOST_WALK_SPEED * dt, remaining)
+			local dir = toTargetFlat.Unit
+			local newX = pos.X + dir.X * step
+			local newZ = pos.Z + dir.Z * step
+			local newY = TerrainHeight.getSurfaceY(newX, newZ) + 3
+			local lookCFrame = CFrame.new(Vector3.new(newX, newY, newZ), Vector3.new(newX + dir.X, newY, newZ + dir.Z))
+			model:PivotTo(lookCFrame)
+		end
 	end
 end
 
@@ -860,7 +1063,11 @@ function BotService:_checkBotGhostEaten(data: BotGhostData)
 	if data.State ~= "Alive" then
 		return
 	end
-	local pos = data.HRP.Position
+	local hrp = data.HRP
+	if not hrp then
+		return -- still loading
+	end
+	local pos = hrp.Position
 	local eatRadius = WormConfig.CollisionRadius + 1
 	local eatRadiusSq = eatRadius * eatRadius
 
@@ -1832,6 +2039,11 @@ function BotService:KnitStart()
 	TeamService = require(script.Parent.TeamService)
 	SandTideService = require(script.Parent.SandTideService)
 	CrownService = require(script.Parent.CrownService)
+
+	-- Pre-warm the bot-ghost avatar cache so the first wave of bot deaths
+	-- doesn't pay catalog-yield latency on each ghost spawn. Loads in
+	-- parallel via task.spawn; safe if this races with the first bot death.
+	self:_prewarmAvatarCache()
 
 	-- Spawn management loop — only fills when round is active
 	task.spawn(function()
