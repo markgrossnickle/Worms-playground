@@ -91,6 +91,7 @@ local EffectsController = Knit.CreateController({
 	_screenGui = nil :: ScreenGui?,
 	_vignetteFrame = nil :: ImageLabel?,
 	_hitMarkerFrame = nil :: Frame?,
+	_hitMarkerHideTask = nil :: thread?,
 	_zoneVignetteFrame = nil :: ImageLabel?,
 
 	-- Power-up auras
@@ -670,17 +671,48 @@ function EffectsController:_onShotReplicated(
 end
 
 function EffectsController:_onHitConfirmed(_targetName: string, _damage: number)
-	-- Show hit marker
+	-- Show hit marker — FPS-style "X" flash at center screen with a brief
+	-- scale pulse so the feedback reads as snappy. Cancels any in-flight
+	-- pulse so rapid hits don't queue up overlapping tweens.
 	local marker = self._hitMarkerFrame
 	if not marker then
 		return
 	end
 
 	marker.Visible = true
-	task.delay(0.15, function()
-		if marker then
+	-- Pulse: start slightly oversized and shrink to base over 100ms.
+	-- The base size for the marker is 30×30 (set in _buildScreenGui).
+	marker.Size = UDim2.fromOffset(50, 50)
+	local tween = TweenService:Create(
+		marker,
+		TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Size = UDim2.fromOffset(30, 30) }
+	)
+	tween:Play()
+
+	-- Hold visible briefly then hide. Cancel previous timer if any.
+	if self._hitMarkerHideTask then
+		task.cancel(self._hitMarkerHideTask)
+		self._hitMarkerHideTask = nil
+	end
+	self._hitMarkerHideTask = task.delay(0.18, function()
+		if marker.Parent then
 			marker.Visible = false
 		end
+		self._hitMarkerHideTask = nil
+	end)
+
+	-- Audible "click" so hits feel kinetic, not just visual. Reuses the
+	-- already-loaded SoundService Click — fires a one-shot at low volume.
+	local SoundService = game:GetService("SoundService")
+	local hitSound = Instance.new("Sound")
+	hitSound.SoundId = "rbxasset://sounds/electronicpingshort.wav"
+	hitSound.Volume = 0.35
+	hitSound.PlaybackSpeed = 1.6
+	hitSound.Parent = SoundService
+	hitSound:Play()
+	hitSound.Ended:Once(function()
+		hitSound:Destroy()
 	end)
 end
 

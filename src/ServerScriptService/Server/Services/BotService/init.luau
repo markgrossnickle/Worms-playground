@@ -9,6 +9,7 @@ local Signal = require(ReplicatedStorage.Packages.Signal)
 local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 local TeamBase = require(ReplicatedStorage.Shared.TeamBase)
+local GhostHealthBar = require(ReplicatedStorage.Shared.GhostHealthBar)
 
 local WormService -- Set in KnitStart via require
 local PowerUpService -- Set in KnitStart via require
@@ -994,6 +995,9 @@ function BotService:_spawnBotGhost(name: string, deathPos: Vector3, color: Color
 		data.MoveTarget = Vector3.new(initialTarget.X, spawnY, initialTarget.Z)
 		data.State = "Alive"
 
+		-- Floating health bar — same module player ghosts use.
+		GhostHealthBar.Attach(model :: Model, WormConfig.Ghost.MaxHP)
+
 		print(
 			string.format(
 				"[bot-ghost] spawned %s at (%.0f, %.0f) team=%d %s",
@@ -1047,6 +1051,11 @@ function BotService:DamageBotGhost(model: Model, damage: number): boolean
 		end
 		self:_despawnBotGhost(data.Name)
 		return true
+	end
+	-- Survived this hit — update the floating health bar so the shooter
+	-- sees their progress.
+	if data.Model then
+		GhostHealthBar.Update(data.Model, data.HP, WormConfig.Ghost.MaxHP)
 	end
 	return false
 end

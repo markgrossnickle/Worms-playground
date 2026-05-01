@@ -12,6 +12,7 @@ local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 local Enums = require(ReplicatedStorage.Shared.Enums)
 local TeamBase = require(ReplicatedStorage.Shared.TeamBase)
 local SpatialIndex = require(ReplicatedStorage.Shared.SpatialIndex)
+local GhostHealthBar = require(ReplicatedStorage.Shared.GhostHealthBar)
 
 type WormState = Enums.WormState
 type WormData = {
@@ -2219,6 +2220,10 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 	-- Reset HP on each spawn — full health every time the ghost respawns.
 	self._ghostHP[player] = WormConfig.Ghost.MaxHP
 
+	-- Attach floating health bar above the head. Updated every time
+	-- DamageGhost runs so observers see the bar drain.
+	GhostHealthBar.Attach(ghost, WormConfig.Ghost.MaxHP)
+
 	-- Assign weapon to the ghost
 	if WeaponService then
 		if weaponType then
@@ -2271,6 +2276,11 @@ function WormService:DamageGhost(player: Player, damage: number, attacker: Playe
 	local hp = (self._ghostHP[player] or WormConfig.Ghost.MaxHP) - damage
 	if hp > 0 then
 		self._ghostHP[player] = hp
+		-- Update the floating health bar so observers see damage.
+		local ghost = self._ghosts[player]
+		if ghost then
+			GhostHealthBar.Update(ghost, hp, WormConfig.Ghost.MaxHP)
+		end
 		return false
 	end
 
