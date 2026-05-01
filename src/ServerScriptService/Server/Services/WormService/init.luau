@@ -1789,11 +1789,9 @@ function WormService:_updateMovement(player: Player, dt: number)
 	local dir = Vector3.new(math.sin(newAngle), 0, math.cos(newAngle))
 	wormData.CurrentDirection = dir
 
-	local shouldBroadcast = (self._broadcastTick % 6 == 0)
-
 	-- Move HRP in direction (anchored, so CFrame set is authoritative).
-	-- Read from cached HeadPosition (source of truth) rather than hrp.Position,
-	-- since hrp is only updated at 10Hz.
+	-- HeadPosition is the per-frame source of truth (HRP CFrame writes
+	-- below propagate it to clients each frame).
 	local move = dir * speed * dt
 	local newPos = wormData.HeadPosition + move
 	newPos = Vector3.new(
@@ -1806,16 +1804,18 @@ function WormService:_updateMovement(player: Player, dt: number)
 	wormData.HeadPosition = newPos
 	wormData.HeadDirection = dir
 
-	-- Only write to Parts at 10Hz to limit anchored-Part replication.
-	if shouldBroadcast then
-		local newCFrame = CFrame.new(newPos, newPos + dir)
-		hrp.CFrame = newCFrame
-
-		-- Move visual worm head to match
-		local wormHead = character:FindFirstChild("WormHead") :: BasePart?
-		if wormHead then
-			wormHead.CFrame = newCFrame
-		end
+	-- Heads (HRP + WormHead) write EVERY FRAME — they drive the local
+	-- camera and visual smoothness. Keeping them at 10Hz produced visible
+	-- jumps every 100ms even with client-side interpolation, since the
+	-- local player's character is excluded from BotInterpController and
+	-- their camera follows hrp.Position directly.
+	-- Replication cost: 4 players × 2 parts × 60Hz = 480 writes/sec
+	-- (negligible vs the bot population's writes).
+	local newCFrame = CFrame.new(newPos, newPos + dir)
+	hrp.CFrame = newCFrame
+	local wormHead = character:FindFirstChild("WormHead") :: BasePart?
+	if wormHead then
+		wormHead.CFrame = newCFrame
 	end
 
 	-- Record position in history for segment following

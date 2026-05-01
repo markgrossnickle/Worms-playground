@@ -33,14 +33,10 @@ local POWERUP_SEEK_RANGE = 35
 local FLEE_RANGE = 28
 local CHASE_RANGE = 45
 -- Worm King: dropped-Crown pickup range. A real detour radius — bots will
--- abandon other tasks to grab a free crown.
+-- abandon other tasks to grab a free crown. Enemy-carrier chase has no
+-- range cap — every bot on the enemy team converges on the carrier
+-- regardless of distance, with separation force preventing pile-up.
 local CROWN_PICKUP_RANGE = 200
--- Enemy-carrier chase range: covers the entire arena. The crown is a
--- global objective; if anyone on the enemy team is carrying it, every bot
--- on our team should converge regardless of distance. (Previously 100,
--- which only triggered when the carrier left their base — they could just
--- circle their corner and bots never engaged.)
-local CROWN_CARRIER_CHASE_RANGE = 9999
 local DIRECTION_CHANGE_MIN = 1
 local DIRECTION_CHANGE_MAX = 3
 local BOOST_CHANCE = 0.1
@@ -1530,7 +1526,7 @@ function BotService:_updateAI(botData: BotData, now: number)
 			local basePos = TeamBase.getScaledBasePositionXZ(botTeam, scale)
 			local toBase = Vector3.new(basePos.X - botPos.X, 0, basePos.Z - botPos.Z)
 			if toBase.Magnitude > 0.1 then
-				botData.Direction = toBase.Unit
+				botData.Direction = self:_applySeparation(botData, botPos, toBase.Unit, botTeam)
 				botData.NextDirectionChange = now + 0.3
 				if botData.Segments > WormConfig.MinBoostSegments + 2 and not botData.Boosting then
 					botData.Boosting = true
@@ -1545,7 +1541,7 @@ function BotService:_updateAI(botData: BotData, now: number)
 			local dropPos = crownState.Position
 			local toCrown = Vector3.new(dropPos.X - botPos.X, 0, dropPos.Z - botPos.Z)
 			if toCrown.Magnitude < CROWN_PICKUP_RANGE and toCrown.Magnitude > 0.1 then
-				botData.Direction = toCrown.Unit
+				botData.Direction = self:_applySeparation(botData, botPos, toCrown.Unit, botTeam)
 				botData.NextDirectionChange = now + 0.4
 				return
 			end
@@ -1556,9 +1552,20 @@ function BotService:_updateAI(botData: BotData, now: number)
 			if not TeamService:AreTeammates(botData.Name, carrierName) then
 				local carrierPos: Vector3? = self:_getWormHeadPosition(carrierName)
 				if carrierPos then
-					local toCarrier = Vector3.new(carrierPos.X - botPos.X, 0, carrierPos.Z - botPos.Z)
-					if toCarrier.Magnitude < CROWN_CARRIER_CHASE_RANGE and toCarrier.Magnitude > 0.1 then
-						botData.Direction = toCarrier.Unit
+					-- Lead the carrier: aim where they WILL be, not where they
+					-- are now. Travel time = distance / our boost speed; the
+					-- carrier is moving at roughly base/boost speed too, so
+					-- we project them forward by that travel time.
+					local carrierDir = self:_getWormHeadDirection(carrierName) or Vector3.zero
+					local distance = (Vector3.new(carrierPos.X, 0, carrierPos.Z) - Vector3.new(botPos.X, 0, botPos.Z)).Magnitude
+					local travelTime = distance / WormConfig.BoostSpeed
+					local leadPos = carrierPos + carrierDir * (WormConfig.BaseSpeed * travelTime)
+					local toLead = Vector3.new(leadPos.X - botPos.X, 0, leadPos.Z - botPos.Z)
+					if toLead.Magnitude > 0.1 then
+						local dir = toLead.Unit
+						-- Apply separation so our whole team doesn't queue up
+						-- on the same path and pile-die on the carrier's tail.
+						botData.Direction = self:_applySeparation(botData, botPos, dir, botTeam)
 						botData.NextDirectionChange = now + 0.3
 						if botData.Segments > WormConfig.MinBoostSegments + 2 and not botData.Boosting then
 							botData.Boosting = true
@@ -1628,8 +1635,60 @@ function BotService:_updateAI(botData: BotData, now: number)
 	end
 end
 
--- Lookup a worm's head position by name. Checks player worms first, then
--- bot worms. Returns nil if the named entity doesn't exist or isn't alive.
+-- Flocking-style separation force. Pushes the bot away from any nearby
+-- TEAMMATE worm head (within SEPARATION_RANGE) — keeps the team from
+-- bunching up on the same target and dying in series. Returns a new
+-- direction vector that's a blend of `baseDir` and the away-from-team
+-- vector (0.6 base / 0.4 separation by feel — bot still pursues but
+-- spreads laterally).
+local SEPARATION_RANGE = 12
+local SEPARATION_RANGE_SQ = SEPARATION_RANGE * SEPARATION_RANGE
+local SEPARATION_MIX = 0.4 -- 0 = no separation, 1 = pure separation
+function BotService:_applySeparation(botData: BotData, botPos: Vector3, baseDir: Vector3, myTeam: number): Vector3
+	if myTeam <= 0 or baseDir.Magnitude < 0.01 then
+		return baseDir
+	end
+	local sepX, sepZ = 0, 0
+	WormService._collisionGrid:ForEachNeighbor(botPos, function(entry)
+		if not entry.IsHead then
+			return nil
+		end
+		if entry.OwnerName == botData.Name then
+			return nil
+		end
+		if entry.TeamIndex ~= myTeam then
+			return nil
+		end
+		local dx = botPos.X - entry.Pos.X
+		local dz = botPos.Z - entry.Pos.Z
+		local distSq = dx * dx + dz * dz
+		if distSq > 0.01 and distSq < SEPARATION_RANGE_SQ then
+			-- Weight by 1/dist² so close teammates push much harder than
+			-- distant ones — produces firm spacing without long-range pull.
+			local w = 1 / distSq
+			sepX += dx * w
+			sepZ += dz * w
+		end
+		return nil
+	end)
+	if sepX * sepX + sepZ * sepZ < 0.0001 then
+		return baseDir
+	end
+	local sepMag = math.sqrt(sepX * sepX + sepZ * sepZ)
+	sepX /= sepMag
+	sepZ /= sepMag
+	local mixedX = baseDir.X * (1 - SEPARATION_MIX) + sepX * SEPARATION_MIX
+	local mixedZ = baseDir.Z * (1 - SEPARATION_MIX) + sepZ * SEPARATION_MIX
+	local mixedMag = math.sqrt(mixedX * mixedX + mixedZ * mixedZ)
+	if mixedMag < 0.001 then
+		return baseDir
+	end
+	return Vector3.new(mixedX / mixedMag, 0, mixedZ / mixedMag)
+end
+
+-- Lookup a worm's head position / direction by name. Checks player worms
+-- first, then bot worms. Returns nil if the named entity doesn't exist
+-- or isn't alive.
 function BotService:_getWormHeadPosition(name: string): Vector3?
 	for player, wormData in WormService._worms do
 		if player.Name == name then
@@ -1642,6 +1701,22 @@ function BotService:_getWormHeadPosition(name: string): Vector3?
 	local botData = self._bots[name]
 	if botData and botData.State == "Alive" then
 		return botData.HeadPosition
+	end
+	return nil
+end
+
+function BotService:_getWormHeadDirection(name: string): Vector3?
+	for player, wormData in WormService._worms do
+		if player.Name == name then
+			if wormData.State == "Alive" then
+				return wormData.HeadDirection
+			end
+			return nil
+		end
+	end
+	local botData = self._bots[name]
+	if botData and botData.State == "Alive" then
+		return botData.HeadDirection
 	end
 	return nil
 end
@@ -1721,21 +1796,19 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 	botData.HeadPosition = newPos
 	botData.HeadDirection = dir
 
-	-- Flush bot Part CFrames at 30Hz (every 2nd Heartbeat) instead of 10Hz.
-	-- Player worms can flush at 10Hz because the local player's camera
-	-- follows the player's own jumpy HRP — the relative motion of the
-	-- world cancels the discretisation. Bots are observed against a smooth
-	-- camera baseline, so 10Hz quantisation is visibly stuttery. 30Hz costs
-	-- 3× the bandwidth of 10Hz but is still well within budget for the
-	-- handful of bots a round actually has (~5-10).
-	if self._broadcastTick % 2 == 0 then
-		local newCFrame = CFrame.new(newPos, newPos + dir)
-		hrp.CFrame = newCFrame
+	-- Heads (HRP + WormHead) write every frame for smooth observed motion.
+	-- BotInterpController on the client lerps between server snaps, but
+	-- with sparse 30Hz snapshots there's a visible "step" feel — going to
+	-- 60Hz removes the quantisation entirely. Replication cost: 24 bots
+	-- × 2 parts × 60Hz = 2,880 head writes/sec, well within budget.
+	-- Segments still throttle (see _updateBotSegments) — they trail the
+	-- head visually and don't need per-frame fidelity.
+	local newCFrame = CFrame.new(newPos, newPos + dir)
+	hrp.CFrame = newCFrame
 
-		local wormHead = model:FindFirstChild("WormHead") :: BasePart?
-		if wormHead then
-			wormHead.CFrame = newCFrame
-		end
+	local wormHead = model:FindFirstChild("WormHead") :: BasePart?
+	if wormHead then
+		wormHead.CFrame = newCFrame
 	end
 
 	self:_recordPosition(botData, newPos)
