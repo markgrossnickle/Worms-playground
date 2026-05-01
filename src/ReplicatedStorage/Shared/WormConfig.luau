@@ -122,7 +122,11 @@ return {
 		GlowBrightness = 1.5,
 		GlowRange = 12,
 		EatValue = 3, -- segments gained by worm eating a ghost
-		RespawnDelay = 5, -- seconds before eaten ghost respawns
+		RespawnDelay = 5, -- seconds before eaten / killed ghost respawns
+		-- Ghost HP: how much weapon damage a ghost can absorb before dying.
+		-- Standard weapons deal 1-2 damage per hit, so 3 HP ≈ 2-3 shots to
+		-- kill — enough that aim matters but kills happen routinely.
+		MaxHP = 3,
 	},
 
 	-- Grapple (ground pull for worm movement)

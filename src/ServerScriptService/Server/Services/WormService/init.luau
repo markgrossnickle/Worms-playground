@@ -82,6 +82,7 @@ local WormService = Knit.CreateService({
 	_botModels = {} :: { [string]: { Model: Model, Segments: number } },
 	_roundActive = false,
 	_ghosts = {} :: { [Player]: Model },
+	_ghostHP = {} :: { [Player]: number }, -- current ghost HP per player; weapon hits deplete; ≤0 → killed + respawn after delay
 	_ghostRiders = {} :: { [string]: { [Player]: boolean } }, -- wormOwnerName -> { ridingGhostPlayer -> true }
 	_ghostKillCounts = {} :: { [Player]: number }, -- ghost knockoff kills per session
 	_rideStartTimes = {} :: { [Player]: number }, -- os.clock() when ghost started riding
@@ -2092,6 +2093,8 @@ function WormService:SpawnGhost(player: Player, weaponType: string?)
 	player.Character = ghost
 
 	self._ghosts[player] = ghost
+	-- Reset HP on each spawn — full health every time the ghost respawns.
+	self._ghostHP[player] = WormConfig.Ghost.MaxHP
 
 	-- Assign weapon to the ghost
 	if WeaponService then
@@ -2114,6 +2117,7 @@ function WormService:DespawnGhost(player: Player)
 
 		ghost:Destroy()
 		self._ghosts[player] = nil
+		self._ghostHP[player] = nil
 
 		-- Clear weapon
 		if WeaponService then
@@ -2129,6 +2133,62 @@ function WormService:DespawnGhost(player: Player)
 	end
 end
 
+-- Apply weapon damage to a player ghost. Returns true iff this hit
+-- killed the ghost (HP went to 0). On kill: despawn the ghost
+-- immediately and schedule a respawn after Ghost.RespawnDelay seconds
+-- (LoL-style death timer). Friendly to round-end / player-leave: the
+-- delayed respawn no-ops if conditions changed.
+function WormService:DamageGhost(player: Player, damage: number, attacker: Player?): boolean
+	if damage <= 0 then
+		return false
+	end
+	if not self._ghosts[player] then
+		return false
+	end
+	local hp = (self._ghostHP[player] or WormConfig.Ghost.MaxHP) - damage
+	if hp > 0 then
+		self._ghostHP[player] = hp
+		return false
+	end
+
+	-- Killed. Show poof at the death position so the shooter sees
+	-- confirmation, credit the attacker, then despawn + delayed respawn.
+	local ghost = self._ghosts[player]
+	local deathPos = Vector3.zero
+	if ghost then
+		local hrp = ghost:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if hrp then
+			deathPos = hrp.Position
+		end
+	end
+	self.Client.GhostEaten:FireAll(deathPos, if attacker then attacker.Name else "")
+
+	if attacker and LeaderboardService then
+		local kills = (self._ghostKillCounts[attacker] or 0) + 1
+		self._ghostKillCounts[attacker] = kills
+		LeaderboardService:SubmitScoreAllPeriods(attacker.UserId, "GhostKills", kills)
+	end
+
+	self:DespawnGhost(player)
+
+	task.delay(WormConfig.Ghost.RespawnDelay, function()
+		-- Only respawn if player still in game, round still active, still dead.
+		if not player or not player.Parent then
+			return
+		end
+		if not self._roundActive then
+			return
+		end
+		local data = self._worms[player]
+		if not data or data.State == "Alive" then
+			return
+		end
+		self:SpawnGhost(player, "Blaster")
+	end)
+
+	return true
+end
+
 function WormService:DespawnAllGhosts()
 	for player, ghost in self._ghosts do
 		self:_onGrappleDetached(player)
@@ -2136,6 +2196,7 @@ function WormService:DespawnAllGhosts()
 		self.Client.GhostDespawned:Fire(player)
 	end
 	self._ghosts = {}
+	self._ghostHP = {}
 	self._ghostRiders = {}
 	self._ghostKillCounts = {}
 	self._rideStartTimes = {}
@@ -2586,6 +2647,7 @@ function WormService:KnitStart()
 		-- userdata via the table key).
 		self._lastDirSetTime[player] = nil
 		self._lastGrappleAttachTime[player] = nil
+		self._ghostHP[player] = nil
 
 		local trove = self._troves[player]
 		if trove then

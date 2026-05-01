@@ -151,6 +151,7 @@ type BotGhostData = {
 	Color: Color3,
 	TeamIndex: number, -- 0 if no team (solo / FFA)
 	State: string,
+	HP: number, -- current health; weapon hits deplete; ≤0 → killed
 	-- Cached current target. With Humanoid we re-issue MoveTo every ~1s
 	-- (Humanoid MoveTo has an 8s internal timeout); without (fallback rig)
 	-- we manually advance the model toward this each frame.
@@ -849,6 +850,7 @@ function BotService:_spawnBotGhost(name: string, deathPos: Vector3, color: Color
 		Color = ghostColor,
 		TeamIndex = teamIndex,
 		State = "Loading",
+		HP = WormConfig.Ghost.MaxHP,
 		MoveTarget = initialTarget,
 		LastMoveTo = 0,
 		NextWanderPick = os.clock() + 1.5 + math.random() * 1.5,
@@ -932,26 +934,38 @@ function BotService:_despawnAllBotGhosts()
 	end
 end
 
--- Public: kill a bot ghost by its Model. Called by WeaponService when a
--- shot raycast hits a Model with the IsBotGhost attribute. The ghost
--- despawns instantly (no HP / phased death — they're just easy targets,
--- like glass mooks) and the GhostEaten signal fires so clients show the
--- standard poof effect.
-function BotService:KillBotGhostByModel(model: Model)
-	if not model then
-		return
+-- Public: deal weapon damage to a bot ghost. Returns true iff the hit
+-- killed the ghost (HP ≤ 0 after the hit), so the caller can credit a
+-- kill. WeaponService calls this for any raycast hit on a Model with
+-- the IsBotGhost attribute.
+function BotService:DamageBotGhost(model: Model, damage: number): boolean
+	if not model or damage <= 0 then
+		return false
 	end
 	-- Look up by name — bot ghosts are keyed by their model name in
 	-- _botGhosts, and the IsBotGhost attribute is set on the model.
 	local data = self._botGhosts[model.Name]
-	if not data then
-		return
+	if not data or data.State ~= "Alive" then
+		return false
 	end
-	local hrp = data.HRP
-	if hrp and WormService and WormService.Client and WormService.Client.GhostEaten then
-		WormService.Client.GhostEaten:FireAll(hrp.Position, "")
+	data.HP -= damage
+	if data.HP <= 0 then
+		-- Fire poof effect at the ghost's position before despawn.
+		local hrp = data.HRP
+		if hrp and WormService and WormService.Client and WormService.Client.GhostEaten then
+			WormService.Client.GhostEaten:FireAll(hrp.Position, "")
+		end
+		self:_despawnBotGhost(data.Name)
+		return true
 	end
-	self:_despawnBotGhost(data.Name)
+	return false
+end
+
+-- Back-compat shim — earlier WeaponService code expected an instant-kill
+-- entry point. Forwarding to the damage path with a huge damage value
+-- effectively kills in one call without callers needing to know HP.
+function BotService:KillBotGhostByModel(model: Model)
+	self:DamageBotGhost(model, math.huge)
 end
 
 -- Walking speed of bot ghosts (studs/sec). 70% of player ghost walk speed.

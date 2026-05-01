@@ -385,20 +385,25 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 			if not pierced and hitModel:GetAttribute("IsGhost") then
 				local ghostOwnerName = hitModel:GetAttribute("GhostOwner")
 
-				-- Bot ghosts: NPC, no Player owner. Despawn instantly on
-				-- hit (glass mooks). The IsBotGhost attribute distinguishes
-				-- them from player ghosts.
+				-- Bot ghosts: NPC, no Player owner. Take weapon damage; HP
+				-- ≤ 0 → despawn permanently (no respawn — new bots dying
+				-- naturally produce new ghosts). The IsBotGhost attribute
+				-- distinguishes them from player ghosts.
 				if hitModel:GetAttribute("IsBotGhost") then
 					hitPlayerName = (ghostOwnerName or hitModel.Name) .. " (ghost)"
-					BotService:KillBotGhostByModel(hitModel)
+					BotService:DamageBotGhost(hitModel, weaponDef.Damage)
 					self.Client.HitConfirmed:Fire(player, hitPlayerName, 0)
 				elseif ghostOwnerName and ghostOwnerName ~= player.Name then
-					-- Player ghost: knockoff if riding, knockback otherwise.
+					-- Player ghost: damage HP. Knockback / knockoff are
+					-- the immediate physical responses; the lethal-on-HP-0
+					-- path is owned by WormService:DamageGhost which
+					-- despawns + schedules a Ghost.RespawnDelay respawn.
 					hitPlayerName = ghostOwnerName .. " (ghost)"
 					local ghostOwner: Player? = Players:FindFirstChild(ghostOwnerName) :: Player?
 
 					if ghostOwner then
-						-- Check if ghost is riding a worm
+						-- Knockback impulse / knockoff (riding) — physical
+						-- feedback regardless of whether this hit was lethal.
 						local isRiding = false
 						for _, riders in WormService._ghostRiders do
 							if riders[ghostOwner] then
@@ -408,15 +413,17 @@ function WeaponService:_onShoot(player: Player, origin: Vector3, direction: Vect
 						end
 
 						if isRiding then
-							-- Knock ghost off the worm
 							WormService:KnockoffGhost(ghostOwner, dir, player)
 						else
-							-- Free-roaming ghost: just apply knockback
 							local ghostHrp = hitModel:FindFirstChild("HumanoidRootPart") :: BasePart?
 							if ghostHrp then
 								ghostHrp:ApplyImpulse(dir * weaponDef.Knockback * 0.5)
 							end
 						end
+
+						-- Now apply damage. If lethal, DamageGhost handles
+						-- the death + respawn-after-delay path internally.
+						WormService:DamageGhost(ghostOwner, weaponDef.Damage, player)
 
 						self.Client.HitConfirmed:Fire(player, ghostOwnerName, 0)
 					end
