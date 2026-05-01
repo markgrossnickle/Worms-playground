@@ -81,6 +81,13 @@ local WormUIController = Knit.CreateController({
 	_countdownFrame = nil :: Frame?,
 	_countdownLabel = nil :: TextLabel?,
 
+	-- Ghost respawn countdown overlay (visible while waiting to respawn
+	-- after being shot down as a ghost — LoL-style death timer).
+	_ghostRespawnFrame = nil :: Frame?,
+	_ghostRespawnLabel = nil :: TextLabel?,
+	_ghostRespawnAt = 0, -- os.clock() at which respawn will fire (0 = inactive)
+	_ghostRespawnConn = nil :: RBXScriptConnection?,
+
 	-- Coin display
 	_coinLabel = nil :: TextLabel?,
 	_coinService = nil :: any,
@@ -190,6 +197,109 @@ function WormUIController:_buildUI()
 	self:_buildGhostHud(gui)
 	self:_buildMatchTimerHUD(gui)
 	self:_buildLockdownBanner(gui)
+	self:_buildGhostRespawnBanner(gui)
+end
+
+-- Ghost-respawn countdown banner (LoL-style death timer). Visible from
+-- the moment a ghost is killed by weapon damage until the moment it
+-- respawns. Centered, large, with a sub-label explaining what's
+-- happening.
+function WormUIController:_buildGhostRespawnBanner(parent: ScreenGui)
+	local frame = Instance.new("Frame")
+	frame.Name = "GhostRespawnBanner"
+	frame.Size = UDim2.new(0, 280, 0, 100)
+	frame.Position = UDim2.fromScale(0.5, 0.32)
+	frame.AnchorPoint = Vector2.new(0.5, 0.5)
+	frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+	frame.BackgroundTransparency = 0.25
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.ZIndex = 30
+	frame.Parent = parent
+	self._ghostRespawnFrame = frame
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 12)
+	corner.Parent = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(180, 200, 255)
+	stroke.Thickness = 2
+	stroke.Transparency = 0.2
+	stroke.Parent = frame
+
+	local subLabel = createTextLabel({
+		Name = "SubLabel",
+		Text = "RESPAWNING IN",
+		Size = UDim2.new(1, 0, 0, 22),
+		Position = UDim2.fromScale(0.5, 0.18),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		TextSize = 16,
+		TextColor3 = Color3.fromRGB(180, 200, 255),
+		Font = Enum.Font.GothamBold,
+		Parent = frame,
+	})
+	subLabel.ZIndex = 31
+
+	local countLabel = createTextLabel({
+		Name = "Countdown",
+		Text = "5",
+		Size = UDim2.new(1, 0, 0, 60),
+		Position = UDim2.fromScale(0.5, 0.62),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		TextSize = 56,
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		Font = Enum.Font.GothamBlack,
+		Parent = frame,
+	})
+	countLabel.ZIndex = 31
+	self._ghostRespawnLabel = countLabel
+end
+
+-- Show the banner with `seconds` remaining; tick down each frame until
+-- _ghostRespawnAt has passed (or HideGhostRespawnCountdown is called).
+function WormUIController:ShowGhostRespawnCountdown(seconds: number)
+	local frame = self._ghostRespawnFrame
+	local label = self._ghostRespawnLabel
+	if not frame or not label then
+		return
+	end
+	self._ghostRespawnAt = os.clock() + seconds
+	frame.Visible = true
+	label.Text = tostring(math.ceil(seconds))
+
+	-- One persistent RenderStepped tick that updates the label until the
+	-- countdown ends. Disconnect any previous one so we don't stack them
+	-- if Show is called twice in quick succession.
+	if self._ghostRespawnConn then
+		self._ghostRespawnConn:Disconnect()
+		self._ghostRespawnConn = nil
+	end
+	self._ghostRespawnConn = RunService.RenderStepped:Connect(function()
+		local remaining = self._ghostRespawnAt - os.clock()
+		if remaining <= 0 then
+			-- Fall through; client will hide explicitly on GhostSpawned,
+			-- but stop the per-frame tick now.
+			label.Text = "0"
+			if self._ghostRespawnConn then
+				self._ghostRespawnConn:Disconnect()
+				self._ghostRespawnConn = nil
+			end
+			return
+		end
+		label.Text = tostring(math.ceil(remaining))
+	end)
+end
+
+function WormUIController:HideGhostRespawnCountdown()
+	if self._ghostRespawnFrame then
+		self._ghostRespawnFrame.Visible = false
+	end
+	if self._ghostRespawnConn then
+		self._ghostRespawnConn:Disconnect()
+		self._ghostRespawnConn = nil
+	end
+	self._ghostRespawnAt = 0
 end
 
 -- Worm King: large countdown clock at top-left (out of the SegmentCounter's way).
@@ -2126,6 +2236,15 @@ function WormUIController:KnitStart()
 	}
 
 	self:_buildUI()
+
+	-- Ghost respawn countdown — show banner on GhostKilled, hide on
+	-- GhostSpawned (server respawns the ghost after Ghost.RespawnDelay).
+	self._trove:Add(self._wormService.GhostKilled:Connect(function(respawnDelay: number)
+		self:ShowGhostRespawnCountdown(respawnDelay)
+	end))
+	self._trove:Add(self._wormService.GhostSpawned:Connect(function(_spawnPos: Vector3)
+		self:HideGhostRespawnCountdown()
+	end))
 
 	-- Worm King: seed team scores + Crown state on start
 	task.spawn(function()

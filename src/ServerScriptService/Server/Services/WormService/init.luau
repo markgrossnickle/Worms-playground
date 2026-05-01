@@ -68,6 +68,11 @@ local WormService = Knit.CreateService({
 		PlayerKillsUpdated = Knit.CreateSignal(),
 		GhostSpawned = Knit.CreateSignal(),
 		GhostDespawned = Knit.CreateSignal(),
+		-- Fires only to the killed player when their ghost dies from
+		-- weapon damage. Carries the respawn delay so the client can
+		-- render a "Respawning in N..." countdown without needing to
+		-- know the server's Ghost.RespawnDelay value.
+		GhostKilled = Knit.CreateSignal(),
 		GhostKnockoff = Knit.CreateSignal(), -- fired to ghost player when shot off a worm
 		GhostEaten = Knit.CreateSignal(), -- fired to all clients when a ghost is eaten (position, eaterName)
 		RiderAttached = Knit.CreateSignal(), -- fired to worm owner when ghost mounts
@@ -2286,6 +2291,12 @@ function WormService:DamageGhost(player: Player, damage: number, attacker: Playe
 		self._ghostKillCounts[attacker] = kills
 		LeaderboardService:SubmitScoreAllPeriods(attacker.UserId, "GhostKills", kills)
 	end
+
+	-- Tell the killed player how long until they respawn so the client
+	-- can render a countdown banner. Fired BEFORE DespawnGhost so the
+	-- killed player's character is still alive when the signal hits and
+	-- the client's "is in ghost mode" check still reads true.
+	self.Client.GhostKilled:Fire(player, WormConfig.Ghost.RespawnDelay)
 
 	self:DespawnGhost(player)
 
