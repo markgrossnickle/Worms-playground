@@ -122,6 +122,11 @@ type BotData = {
 	LastRecordedPos: Vector3,
 	NextDirectionChange: number,
 	BoostEndTime: number,
+	-- AI throttling: AI decisions run at ~10Hz instead of 60Hz. Movement
+	-- still updates every frame for smooth motion, but the expensive
+	-- _findNearestFood / _findNearestWormThreat / crown logic only runs
+	-- when os.clock() crosses NextAIUpdate. 6× cheaper AI per frame.
+	NextAIUpdate: number,
 	LerpingSegments: { [number]: { StartTime: number, StartPos: Vector3 } }?, -- indices currently lerping after mid-body hit
 	-- Bandwidth optimization: server-side source-of-truth positions.
 	-- Updated every Heartbeat, but only flushed to Parts at 10Hz to reduce replication.
@@ -158,6 +163,9 @@ type BotGhostData = {
 	MoveTarget: Vector3,
 	LastMoveTo: number,
 	NextWanderPick: number,
+	-- AI throttle: enemy scan and wander-pick at 5Hz, not 60Hz. Position
+	-- update still runs every frame for smooth motion.
+	NextAIUpdate: number,
 	DespawnAt: number,
 }
 
@@ -468,6 +476,7 @@ function BotService:_spawnBot()
 		LastRecordedPos = Vector3.zero,
 		NextDirectionChange = os.clock() + math.random() * DIRECTION_CHANGE_MAX + DIRECTION_CHANGE_MIN,
 		BoostEndTime = 0,
+		NextAIUpdate = 0, -- runs immediately on first heartbeat after spawn
 		HeadPosition = Vector3.zero,
 		HeadDirection = Vector3.new(0, 0, -1),
 		SegmentPositions = {},
@@ -854,6 +863,7 @@ function BotService:_spawnBotGhost(name: string, deathPos: Vector3, color: Color
 		MoveTarget = initialTarget,
 		LastMoveTo = 0,
 		NextWanderPick = os.clock() + 1.5 + math.random() * 1.5,
+		NextAIUpdate = 0,
 		DespawnAt = os.clock() + BOT_GHOST_LIFETIME,
 	}
 	self._botGhosts[name] = data
@@ -998,49 +1008,53 @@ function BotService:_updateBotGhostAI(data: BotGhostData, now: number, dt: numbe
 
 	local pos = hrp.Position
 
-	-- Pursue: closest enemy worm within 40 studs (player or bot).
-	local closestEnemyPos: Vector3? = nil
-	local closestDist = 40
+	-- AI throttle: enemy scan + wander-pick at 5Hz. Position-advancement
+	-- (Humanoid:MoveTo refresh / manual PivotTo) still runs every frame
+	-- below, so motion stays smooth even though decisions are coarser.
+	if now >= data.NextAIUpdate then
+		data.NextAIUpdate = now + 0.18 + math.random() * 0.04 -- ~5 Hz, jittered
 
-	for player, wormData in WormService._worms do
-		if wormData.State == "Alive" and wormData.HeadPosition then
-			if not (TeamService and TeamService:AreTeammates(data.Name, player.Name)) then
-				local dist = (wormData.HeadPosition - pos).Magnitude
-				if dist < closestDist then
-					closestDist = dist
-					closestEnemyPos = wormData.HeadPosition
-				end
+		-- Pursue: closest enemy worm head within 40 studs. Use the shared
+		-- spatial grid (already populated this frame) instead of iterating
+		-- all worms.
+		local closestEnemyPos: Vector3? = nil
+		local closestDistSq = 40 * 40
+		WormService._collisionGrid:ForEachNeighbor(pos, function(entry)
+			if not entry.IsHead then
+				return nil
 			end
-		end
-	end
-	for botName, botData in self._bots do
-		if botData.State == "Alive" and botData.HeadPosition then
-			if not (TeamService and TeamService:AreTeammates(data.Name, botName)) then
-				local dist = (botData.HeadPosition - pos).Magnitude
-				if dist < closestDist then
-					closestDist = dist
-					closestEnemyPos = botData.HeadPosition
-				end
+			if entry.OwnerName == data.Name then
+				return nil
 			end
-		end
-	end
+			if data.TeamIndex > 0 and entry.TeamIndex == data.TeamIndex then
+				return nil
+			end
+			local dx = entry.Pos.X - pos.X
+			local dz = entry.Pos.Z - pos.Z
+			local distSq = dx * dx + dz * dz
+			if distSq < closestDistSq then
+				closestDistSq = distSq
+				closestEnemyPos = entry.Pos
+			end
+			return nil
+		end)
 
-	if closestEnemyPos then
-		-- Pursuit: re-target every frame to track the moving worm.
-		data.MoveTarget = Vector3.new(closestEnemyPos.X, pos.Y, closestEnemyPos.Z)
-		data.NextWanderPick = now + 0.5 -- delay next random wander pick a bit
-	elseif now >= data.NextWanderPick then
-		-- Wander: pick a new random target every 2-4 seconds.
-		local angle = math.random() * math.pi * 2
-		local distance = math.random() * BOT_GHOST_WANDER_RADIUS + 5
-		local target = pos + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
-		local margin = 30
-		data.MoveTarget = Vector3.new(
-			math.clamp(target.X, -HALF_ARENA + margin, HALF_ARENA - margin),
-			pos.Y,
-			math.clamp(target.Z, -HALF_ARENA + margin, HALF_ARENA - margin)
-		)
-		data.NextWanderPick = now + 2 + math.random() * 2
+		if closestEnemyPos then
+			data.MoveTarget = Vector3.new(closestEnemyPos.X, pos.Y, closestEnemyPos.Z)
+			data.NextWanderPick = now + 0.5
+		elseif now >= data.NextWanderPick then
+			-- No enemy in range: pick a new random wander target every 2-4 seconds.
+			local angle = math.random() * math.pi * 2
+			local distance = math.random() * BOT_GHOST_WANDER_RADIUS + 5
+			local target = pos + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
+			local margin = 30
+			data.MoveTarget = Vector3.new(
+				math.clamp(target.X, -HALF_ARENA + margin, HALF_ARENA - margin),
+				pos.Y,
+				math.clamp(target.Z, -HALF_ARENA + margin, HALF_ARENA - margin)
+			)
+			data.NextWanderPick = now + 2 + math.random() * 2
+		end
 	end
 
 	if data.Humanoid then
@@ -1354,62 +1368,58 @@ function BotService:_findNearestWormThreat(botName: string, botPos: Vector3, bot
 	local FLEE_SIZE_RATIO = 1.4
 	local CHASE_MAX_RATIO = 1.4 -- chase anyone up to 1.4× my size
 
+	local myTeam = 0
+	if TeamService and TeamService:IsEnabled() then
+		myTeam = TeamService:GetTeamForMember(botName) or 0
+	end
+
 	local fleeTarget: Vector3? = nil
-	local fleeDist = FLEE_RANGE
+	local fleeDistSq = FLEE_RANGE * FLEE_RANGE
 	local chaseTarget: Vector3? = nil
-	local chaseDist = CHASE_RANGE
+	local chaseDistSq = CHASE_RANGE * CHASE_RANGE
 
-	-- Check player worms
-	for player, wormData in WormService._worms do
-		if wormData.State ~= "Alive" then
-			continue
+	-- Spatial-grid query over heads only. The grid has BOTH player and bot
+	-- entries, so one walk covers what was previously two separate loops.
+	-- 9-cell neighborhood at cell size 30 covers up to ~90 stud radius —
+	-- larger than CHASE_RANGE (45), so we don't miss any in-range enemy.
+	WormService._collisionGrid:ForEachNeighbor(botPos, function(entry)
+		if not entry.IsHead then
+			return nil -- only consider heads for threat search
 		end
-		-- Skip teammates
-		if TeamService:AreTeammates(botName, player.Name) then
-			continue
+		if entry.OwnerName == botName then
+			return nil
 		end
-		local char = player.Character
-		if not char then
-			continue
-		end
-		local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
-		if not hrp then
-			continue
+		if myTeam > 0 and entry.TeamIndex == myTeam then
+			return nil
 		end
 
-		local dist = (hrp.Position - botPos).Magnitude
-		if wormData.Segments > botSegments * FLEE_SIZE_RATIO and dist < fleeDist then
-			fleeDist = dist
-			fleeTarget = hrp.Position
-		elseif wormData.Segments <= botSegments * CHASE_MAX_RATIO and dist < chaseDist then
-			chaseDist = dist
-			chaseTarget = hrp.Position
+		-- Look up the entity's segment count to apply the size ratio
+		-- thresholds. Player vs bot lookup.
+		local otherSegments: number? = nil
+		local otherPlayer = Players:FindFirstChild(entry.OwnerName) :: Player?
+		if otherPlayer then
+			local d = WormService._worms[otherPlayer]
+			otherSegments = if d and d.State == "Alive" then d.Segments else nil
+		else
+			local d = self._bots[entry.OwnerName]
+			otherSegments = if d and d.State == "Alive" then d.Segments else nil
 		end
-	end
-
-	-- Check other bots
-	for otherName, otherData in self._bots do
-		if otherName == botName or otherData.State ~= "Alive" then
-			continue
-		end
-		-- Skip teammates
-		if TeamService:AreTeammates(botName, otherName) then
-			continue
-		end
-		local otherHrp = otherData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
-		if not otherHrp then
-			continue
+		if not otherSegments then
+			return nil
 		end
 
-		local dist = (otherHrp.Position - botPos).Magnitude
-		if otherData.Segments > botSegments * FLEE_SIZE_RATIO and dist < fleeDist then
-			fleeDist = dist
-			fleeTarget = otherHrp.Position
-		elseif otherData.Segments <= botSegments * CHASE_MAX_RATIO and dist < chaseDist then
-			chaseDist = dist
-			chaseTarget = otherHrp.Position
+		local dx = entry.Pos.X - botPos.X
+		local dz = entry.Pos.Z - botPos.Z
+		local distSq = dx * dx + dz * dz
+		if otherSegments > botSegments * FLEE_SIZE_RATIO and distSq < fleeDistSq then
+			fleeDistSq = distSq
+			fleeTarget = entry.Pos
+		elseif otherSegments <= botSegments * CHASE_MAX_RATIO and distSq < chaseDistSq then
+			chaseDistSq = distSq
+			chaseTarget = entry.Pos
 		end
-	end
+		return nil
+	end)
 
 	if fleeTarget then
 		return fleeTarget, true
@@ -1862,12 +1872,6 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 end
 
 function BotService:_checkBotCollisions(botData: BotData)
-	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return
-	end
-
-	-- Use server-side source of truth (HRP is only flushed at 10Hz).
 	local headPos = botData.HeadPosition
 
 	-- Ghost power-up: skip collisions
@@ -1875,65 +1879,48 @@ function BotService:_checkBotCollisions(botData: BotData)
 		return
 	end
 
-	-- Check against player segments
-	for player, wormData in WormService._worms do
-		if wormData.State ~= "Alive" then
-			continue
-		end
-		-- Skip teammates
-		if TeamService:AreTeammates(botData.Name, player.Name) then
-			continue
-		end
-		local char = player.Character
-		if not char then
-			continue
-		end
-		local segFolder = char:FindFirstChild("WormSegments") :: Folder?
-		if not segFolder then
-			continue
-		end
-
-		for _, seg in segFolder:GetChildren() do
-			if seg:IsA("BasePart") then
-				local segDist = (seg.Position - headPos).Magnitude
-				if segDist < WormConfig.CollisionRadius * 2 then
-					self:_killBot(botData.Name, player.Name)
-					return
-				end
-			end
-		end
+	local myName = botData.Name
+	local myTeam = 0
+	if TeamService and TeamService:IsEnabled() then
+		myTeam = TeamService:GetTeamForMember(myName) or 0
 	end
+	local thresholdSq = (WormConfig.CollisionRadius * 2) ^ 2
 
-	-- Check against other bot segments. Use the other bot's server-side
-	-- SegmentPositions table (source of truth) rather than reading Part.Position,
-	-- which only reflects the most recent 10Hz flush.
-	for otherName, otherData in self._bots do
-		if otherName == botData.Name or otherData.State ~= "Alive" then
-			continue
+	-- Single grid query for any-other-segment-near-my-head check.
+	-- Replaces the prior O(N·S) iteration over every player + every
+	-- bot's segment list with a 9-cell neighborhood walk (typically
+	-- 1-3 entries per cell). ~100× cheaper in dense scenarios.
+	local hitOwnerName: string? = nil
+	WormService._collisionGrid:ForEachNeighbor(headPos, function(entry)
+		if entry.OwnerName == myName then
+			return nil -- self
 		end
-		-- Skip teammates
-		if TeamService:AreTeammates(botData.Name, otherName) then
-			continue
+		if myTeam > 0 and entry.TeamIndex == myTeam then
+			return nil -- teammate
 		end
-
-		for _, segPos in otherData.SegmentPositions do
-			local segDist = (segPos - headPos).Magnitude
-			if segDist < WormConfig.CollisionRadius * 2 then
-				self:_killBot(botData.Name, otherName)
-				return
-			end
+		local dx = entry.Pos.X - headPos.X
+		local dy = entry.Pos.Y - headPos.Y
+		local dz = entry.Pos.Z - headPos.Z
+		if dx * dx + dy * dy + dz * dz < thresholdSq then
+			hitOwnerName = entry.OwnerName
+			return true
 		end
+		return nil
+	end)
+	if hitOwnerName then
+		self:_killBot(myName, hitOwnerName)
+		return
 	end
 
 	-- Check static arena bounds
 	if math.abs(headPos.X) > HALF_ARENA or math.abs(headPos.Z) > HALF_ARENA then
-		self:_killBot(botData.Name, nil)
+		self:_killBot(myName, nil)
 		return
 	end
 
 	-- Check shrink zone bounds
 	if ShrinkZoneService:IsOutsideZone(headPos) then
-		self:_killBot(botData.Name, nil)
+		self:_killBot(myName, nil)
 	end
 end
 
@@ -2085,6 +2072,10 @@ function BotService:KnitStart()
 		self._broadcastTick += 1
 		local now = os.clock()
 
+		-- Rebuild the shared collision grid for this frame. Idempotent —
+		-- if WormService already rebuilt this same frame, this no-ops.
+		WormService:RebuildCollisionGrid(self)
+
 		-- Collect bot names first to avoid modifying table during iteration
 		local botNames = {}
 		for name, botData in self._bots do
@@ -2099,7 +2090,14 @@ function BotService:KnitStart()
 				continue
 			end
 
-			self:_updateAI(botData, now)
+			-- AI throttled to ~10Hz. Movement + collision still run every
+			-- frame for smooth motion / accurate hits, but the expensive
+			-- decision-making (food / threat / crown lookups) doesn't
+			-- need 60 reactions per second.
+			if now >= botData.NextAIUpdate then
+				self:_updateAI(botData, now)
+				botData.NextAIUpdate = now + 0.08 + math.random() * 0.04 -- 8-12 Hz, jittered
+			end
 			self:_updateBotMovement(botData, dt)
 			self:_updateBotSegments(botData)
 			self:_checkBotFoodCollection(botData)

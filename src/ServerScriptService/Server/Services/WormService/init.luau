@@ -11,6 +11,7 @@ local WormConfig = require(ReplicatedStorage.Shared.WormConfig)
 local TerrainHeight = require(ReplicatedStorage.Shared.TerrainHeight)
 local Enums = require(ReplicatedStorage.Shared.Enums)
 local TeamBase = require(ReplicatedStorage.Shared.TeamBase)
+local SpatialIndex = require(ReplicatedStorage.Shared.SpatialIndex)
 
 type WormState = Enums.WormState
 type WormData = {
@@ -98,6 +99,14 @@ local WormService = Knit.CreateService({
 	-- BotService both call _tryClaimMagnetPull before writing food.Position
 	-- so the same food can't be Position-replicated twice in one tick.
 	_magnetClaim = setmetatable({}, { __mode = "k" }) :: any,
+	-- Shared spatial grid for fast neighbor lookups. Populated each frame
+	-- with every alive worm's head + segment positions. WormService and
+	-- BotService both query it for collision checks and AI threat search,
+	-- replacing what was previously O(N²·S) iteration each frame.
+	_collisionGrid = SpatialIndex.new(30),
+	-- os.clock() at last rebuild — used by RebuildCollisionGrid to dedupe
+	-- when both services try to rebuild on the same frame.
+	_collisionGridBuiltAt = 0,
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -1314,6 +1323,82 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 	PowerUpService:CollectPowerUp(player.Name, headPos)
 end
 
+-- Rebuild the shared spatial grid from cached positions. Idempotent within
+-- a single frame: callers from WormService.Heartbeat and BotService.Heartbeat
+-- can both invoke and only the first one this frame does work.
+--
+-- The grid is the source of truth for:
+--   - WormService:_checkWormCollisions (player worm vs everyone)
+--   - BotService:_checkBotCollisions (bot worm vs everyone)
+--   - BotService:_findNearestWormThreat (AI threat search)
+--
+-- It's rebuilt from already-cached server-side positions
+-- (`wormData.HeadPosition`, `wormData.SegmentPositions[i]`, same for bots),
+-- so this adds no Roblox property reads — pure Lua table walk.
+function WormService:RebuildCollisionGrid(botService: any)
+	local now = os.clock()
+	-- Skip if already built this frame (within 5ms ≈ same Heartbeat tick).
+	if (now - self._collisionGridBuiltAt) < 0.005 then
+		return
+	end
+	self._collisionGridBuiltAt = now
+
+	local grid = self._collisionGrid
+	grid:Clear()
+
+	-- Insert every alive player worm — head + each segment.
+	for player, wormData in self._worms do
+		if wormData.State ~= "Alive" then
+			continue
+		end
+		local teamIndex = 0
+		if TeamService and TeamService:IsEnabled() then
+			teamIndex = TeamService:GetTeamForMember(player.Name) or 0
+		end
+		grid:Insert({
+			Pos = wormData.HeadPosition,
+			OwnerName = player.Name,
+			TeamIndex = teamIndex,
+			IsHead = true,
+		})
+		for _, segPos in wormData.SegmentPositions do
+			grid:Insert({
+				Pos = segPos,
+				OwnerName = player.Name,
+				TeamIndex = teamIndex,
+				IsHead = false,
+			})
+		end
+	end
+
+	-- Insert every alive bot — head + each segment.
+	if botService then
+		for botName, botData in botService._bots do
+			if botData.State ~= "Alive" then
+				continue
+			end
+			local teamIndex = 0
+			if TeamService and TeamService:IsEnabled() then
+				teamIndex = TeamService:GetTeamForMember(botName) or 0
+			end
+			grid:Insert({
+				Pos = botData.HeadPosition,
+				OwnerName = botName,
+				TeamIndex = teamIndex,
+				IsHead = true,
+			})
+			for _, segPos in botData.SegmentPositions do
+				grid:Insert({
+					Pos = segPos,
+					OwnerName = botName,
+					TeamIndex = teamIndex,
+					IsHead = false,
+				})
+			end
+		end
+	end
+end
+
 function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 	local wormData = self._worms[player]
 	if not wormData or wormData.State ~= "Alive" then
@@ -1330,76 +1415,45 @@ function WormService:_checkWormCollisions(player: Player, headPos: Vector3)
 		return
 	end
 
-	-- Check against other player segments.
-	-- Read positions from otherData.SegmentPositions (updated every frame) rather than
-	-- seg.Position (only written at 10Hz), so collisions are still frame-accurate.
-	for otherPlayer, otherData in self._worms do
-		if otherPlayer == player or otherData.State ~= "Alive" then
-			continue
-		end
-
-		-- Team mode: skip teammate collisions
-		if TeamService:AreTeammates(player.Name, otherPlayer.Name) then
-			continue
-		end
-
-		local otherChar = otherPlayer.Character
-		if not otherChar then
-			continue
-		end
-
-		local segFolder = otherChar:FindFirstChild("WormSegments") :: Folder?
-		if not segFolder then
-			continue
-		end
-
-		local otherSegPositions = otherData.SegmentPositions
-		for _, seg in segFolder:GetChildren() do
-			if seg:IsA("BasePart") then
-				-- Segment names are "Segment<N>"; SegmentPositions is keyed by N.
-				local idx = tonumber(seg.Name:sub(8))
-				local segPos = if idx then otherSegPositions[idx] else nil
-				-- Fall back to the Part position if the cache hasn't been populated
-				-- yet (e.g. brand-new segment created mid-frame).
-				if not segPos then
-					segPos = seg.Position
-				end
-				local segDist = (segPos - headPos).Magnitude
-				if segDist < WormConfig.CollisionRadius * 2 then
-					-- Shield power-up: consume shield instead of dying
-					if PowerUpService:ConsumeShield(player.Name) then
-						return
-					end
-					self:_killWorm(player, otherPlayer)
-					return
-				end
-			end
-		end
+	local myName = player.Name
+	local myTeam = 0
+	if TeamService and TeamService:IsEnabled() then
+		myTeam = TeamService:GetTeamForMember(myName) or 0
 	end
+	local thresholdSq = (WormConfig.CollisionRadius * 2) ^ 2
 
-	-- Check against bot segments
-	for botName, botInfo in self._botModels do
-		-- Team mode: skip teammate collisions
-		if TeamService:AreTeammates(player.Name, botName) then
-			continue
+	-- Single grid query covers any-other-worm-segment-near-my-head check.
+	-- Replaces O(N·S) iteration with O(k) where k = entities in 9
+	-- neighbor cells (typically 1-3 in this arena).
+	local hitOwnerName: string? = nil
+	self._collisionGrid:ForEachNeighbor(headPos, function(entry)
+		if entry.OwnerName == myName then
+			return nil -- self
 		end
-
-		local segFolder = botInfo.Model:FindFirstChild("WormSegments") :: Folder?
-		if not segFolder then
-			continue
+		if myTeam > 0 and entry.TeamIndex == myTeam then
+			return nil -- teammate
 		end
+		local dx = entry.Pos.X - headPos.X
+		local dy = entry.Pos.Y - headPos.Y
+		local dz = entry.Pos.Z - headPos.Z
+		if dx * dx + dy * dy + dz * dz < thresholdSq then
+			hitOwnerName = entry.OwnerName
+			return true -- stop iteration on first hit
+		end
+		return nil
+	end)
 
-		for _, seg in segFolder:GetChildren() do
-			if seg:IsA("BasePart") then
-				local segDist = (seg.Position - headPos).Magnitude
-				if segDist < WormConfig.CollisionRadius * 2 then
-					if PowerUpService:ConsumeShield(player.Name) then
-						return
-					end
-					self:_killWorm(player, nil, botName)
-					return
-				end
-			end
+	if hitOwnerName then
+		-- Shield power-up: consume shield instead of dying
+		if PowerUpService:ConsumeShield(player.Name) then
+			return
+		end
+		-- Identify killer: player vs bot. Look up by name in players first.
+		local killerPlayer = Players:FindFirstChild(hitOwnerName) :: Player?
+		if killerPlayer then
+			self:_killWorm(player, killerPlayer)
+		else
+			self:_killWorm(player, nil, hitOwnerName)
 		end
 	end
 end
@@ -1735,6 +1789,10 @@ function WormService:_gameStep(dt: number)
 		local toSpawn = math.min(foodDeficit, 10) -- Spawn up to 10 per frame
 		self:_spawnFoodBatch(toSpawn)
 	end
+
+	-- Rebuild the shared spatial grid for this frame's collision/AI checks.
+	-- Idempotent — if BotService already rebuilt this frame, this is a no-op.
+	self:RebuildCollisionGrid(self._botService)
 
 	-- Update all alive worms
 	for player, wormData in self._worms do
