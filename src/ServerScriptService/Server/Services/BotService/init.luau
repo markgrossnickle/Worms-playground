@@ -637,6 +637,85 @@ end
 -- attributes set so weapon hits + ghost-eat both apply, name billboard
 -- on the head, optional team-color outline. Returns (model, humanoid,
 -- hrp) or (nil, nil, nil) if the catalog fetch failed.
+-- Default Roblox character animation asset IDs, indexed by rig type.
+-- These are the public, platform-bundled animations Roblox uses for any
+-- new player character. We need them because models returned from
+-- `Players:CreateHumanoidModelFromUserId` come with the rig + a
+-- HumanoidDescription pointing at animation IDs, but Roblox does NOT
+-- auto-attach the `Animate` LocalScript to NPCs (only to player
+-- characters). Without animation tracks loaded, the Humanoid moves but
+-- the limbs don't articulate — that's the "sliding" the user reported.
+local DEFAULT_R6_ANIMS = { Idle = 180435571, Walk = 180426354 }
+local DEFAULT_R15_ANIMS = { Idle = 2510196951, Walk = 2510202577 }
+
+-- Configure idle / walk animations on the bot ghost's Humanoid. Pulls
+-- the avatar's own animation IDs from its HumanoidDescription when
+-- present (so each avatar uses its own chosen anims), falling back to
+-- the platform defaults by rig type.
+function BotService:_setupBotGhostAnimations(humanoid: Humanoid)
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = humanoid
+	end
+
+	-- Look up the avatar's own idle/walk animation IDs from its applied
+	-- description. GetAppliedDescription is async-ish; pcall to be safe.
+	local idleId, walkId
+	local ok, desc = pcall(function()
+		return humanoid:GetAppliedDescription()
+	end)
+	if ok and desc then
+		if desc.IdleAnimation and desc.IdleAnimation > 0 then
+			idleId = desc.IdleAnimation
+		end
+		if desc.WalkAnimation and desc.WalkAnimation > 0 then
+			walkId = desc.WalkAnimation
+		end
+	end
+
+	-- Fall back to platform-default IDs by rig type. R15 and R6 use
+	-- different animation formats; using the wrong set produces broken
+	-- limb angles.
+	local defaults = if humanoid.RigType == Enum.HumanoidRigType.R6 then DEFAULT_R6_ANIMS else DEFAULT_R15_ANIMS
+	idleId = idleId or defaults.Idle
+	walkId = walkId or defaults.Walk
+
+	local idleAnim = Instance.new("Animation")
+	idleAnim.AnimationId = "rbxassetid://" .. tostring(idleId)
+	local walkAnim = Instance.new("Animation")
+	walkAnim.AnimationId = "rbxassetid://" .. tostring(walkId)
+
+	local idleTrack = animator:LoadAnimation(idleAnim)
+	local walkTrack = animator:LoadAnimation(walkAnim)
+	idleTrack.Looped = true
+	walkTrack.Looped = true
+	-- Start in idle; the first MoveTo call will flip us to walking.
+	idleTrack:Play(0.2)
+
+	-- Switch tracks on Humanoid.Running. The default walk anim is built
+	-- for 16 stud/s — scale playback rate so faster walk speeds animate
+	-- proportionally faster (matches the visual cadence to motion).
+	humanoid.Running:Connect(function(speed)
+		if speed > 0.1 then
+			walkTrack:AdjustSpeed(math.max(0.5, speed / 16))
+			if not walkTrack.IsPlaying then
+				walkTrack:Play(0.2)
+			end
+			if idleTrack.IsPlaying then
+				idleTrack:Stop(0.2)
+			end
+		else
+			if walkTrack.IsPlaying then
+				walkTrack:Stop(0.2)
+			end
+			if not idleTrack.IsPlaying then
+				idleTrack:Play(0.2)
+			end
+		end
+	end)
+end
+
 function BotService:_buildBotGhostFromAvatar(
 	name: string,
 	teamColor: Color3,
@@ -666,6 +745,11 @@ function BotService:_buildBotGhostFromAvatar(
 	humanoid.Health = math.huge
 	humanoid.BreakJointsOnDeath = false
 	humanoid.AutoRotate = true
+
+	-- Load idle + walk animation tracks. Without this, NPCs (which
+	-- don't get the auto-injected `Animate` LocalScript that player
+	-- characters do) move with no limb articulation — they slide.
+	self:_setupBotGhostAnimations(humanoid)
 
 	-- Disable collisions on body parts so ghosts pass through worms / each
 	-- other without physics fights. Keep CanQuery so the weapon raycast
