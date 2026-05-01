@@ -1651,24 +1651,31 @@ function BotService:_updateBotMovement(botData: BotData, dt: number)
 	local sizeScale = 1 / (1 + botData.Segments * WormConfig.SpeedScaleFactor)
 	local slowFactor = PowerUpService:GetSlowFactor(botData.Name)
 	local speed = WormConfig.BaseSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(botData.Name) * slowFactor
-	if botData.Boosting and botData.Segments > WormConfig.MinBoostSegments then
-		speed = WormConfig.BoostSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(botData.Name) * slowFactor
-		local prevFloor = math.floor(botData.Segments)
-		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
-		botData.Segments = math.max(WormConfig.MinBoostSegments, botData.Segments - segmentsToLose)
-		local newFloor = math.floor(botData.Segments)
 
-		if newFloor < prevFloor then
-			local segFolder = model:FindFirstChild("WormSegments") :: Folder?
-			if segFolder then
-				for _, seg in segFolder:GetChildren() do
-					local idx = tonumber(string.match(seg.Name, "%d+"))
-					if idx and idx > newFloor then
-						seg:Destroy()
+	-- Free-boost powerups (SPEED / SPEED_BURST) auto-engage boost AND
+	-- waive segment cost. Mirrors WormService boost path.
+	local hasFreeBoost = PowerUpService:HasFreeBoost(botData.Name)
+	local boostingNow = hasFreeBoost or (botData.Boosting and botData.Segments > WormConfig.MinBoostSegments)
+	if boostingNow then
+		speed = WormConfig.BoostSpeed * sizeScale * PowerUpService:GetSpeedMultiplier(botData.Name) * slowFactor
+		if not hasFreeBoost then
+			local prevFloor = math.floor(botData.Segments)
+			local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
+			botData.Segments = math.max(WormConfig.MinBoostSegments, botData.Segments - segmentsToLose)
+			local newFloor = math.floor(botData.Segments)
+
+			if newFloor < prevFloor then
+				local segFolder = model:FindFirstChild("WormSegments") :: Folder?
+				if segFolder then
+					for _, seg in segFolder:GetChildren() do
+						local idx = tonumber(string.match(seg.Name, "%d+"))
+						if idx and idx > newFloor then
+							seg:Destroy()
+						end
 					end
 				end
+				WormService:UpdateBotSegments(botData.Name, newFloor)
 			end
-			WormService:UpdateBotSegments(botData.Name, newFloor)
 		end
 	else
 		botData.Boosting = false

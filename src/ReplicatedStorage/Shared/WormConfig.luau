@@ -46,9 +46,17 @@ return {
 	PowerUpMaxOnMap = 4,
 	PowerUpDespawnTime = 20,
 	PowerUpTypes = {
-		SPEED = { Duration = 3, SpeedMultiplier = 2 },
+		-- SPEED: unlimited boost for duration. No raw speed multiplier — the
+		-- powerup just lets you hold boost speed without paying segment cost
+		-- (and auto-engages it). Previous 2x multiplier was too far above
+		-- BoostSpeed and felt unfair.
+		SPEED = { Duration = 4 },
 		MAGNET = { Duration = 10, Range = 25 },
-		SPEED_BURST = { Duration = 3, SpeedMultiplier = 3 },
+		-- SPEED_BURST: short, sharper kick. Toned down 3.0 → 1.5 — combined
+		-- with boost (which auto-engages while SPEED_BURST is active) the
+		-- effective top speed is BoostSpeed × 1.5, still notably faster than
+		-- a normal boost.
+		SPEED_BURST = { Duration = 2, SpeedMultiplier = 1.5 },
 		GHOST = { Duration = 5 },
 		SHIELD = { Duration = 0 }, -- one-time save, no duration
 		SIZE_BOMB = { Duration = 0, SegmentsAdded = 5 }, -- instant effect

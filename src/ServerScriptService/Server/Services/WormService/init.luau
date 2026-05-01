@@ -658,6 +658,10 @@ function WormService:_setupCharacter(player: Player, character: Model)
 	humanoid.JumpPower = 0
 	humanoid.JumpHeight = 0
 
+	-- Tag for client-side interpolation (BotInterpController-style smoothing
+	-- on every non-local worm — bots already use IsBotWorm, players use this).
+	character:SetAttribute("IsPlayerWorm", true)
+
 	local hrp = character:FindFirstChild("HumanoidRootPart") :: BasePart?
 	if not hrp then
 		return
@@ -1631,30 +1635,39 @@ function WormService:_updateMovement(player: Player, dt: number)
 		* PowerUpService:GetSpeedMultiplier(player.Name)
 		* slowFactor
 		* riderBoost
-	if wormData.Boosting and wormData.Segments > WormConfig.MinBoostSegments then
+
+	-- "Free boost" powerups (SPEED / SPEED_BURST) auto-engage boost AND
+	-- waive the segment cost. Without a powerup, normal boost rules apply:
+	-- player must be holding the input AND have segments above the floor,
+	-- and the boost burns segments.
+	local hasFreeBoost = PowerUpService:HasFreeBoost(player.Name)
+	local boostingNow = hasFreeBoost or (wormData.Boosting and wormData.Segments > WormConfig.MinBoostSegments)
+	if boostingNow then
 		speed = WormConfig.BoostSpeed
 			* sizeScale
 			* PowerUpService:GetSpeedMultiplier(player.Name)
 			* slowFactor
 			* riderBoost
-		local prevFloor = math.floor(wormData.Segments)
-		local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
-		wormData.Segments = math.max(WormConfig.MinBoostSegments, wormData.Segments - segmentsToLose)
-		local newFloor = math.floor(wormData.Segments)
+		if not hasFreeBoost then
+			local prevFloor = math.floor(wormData.Segments)
+			local segmentsToLose = WormConfig.BoostSegmentCostPerSec * dt
+			wormData.Segments = math.max(WormConfig.MinBoostSegments, wormData.Segments - segmentsToLose)
+			local newFloor = math.floor(wormData.Segments)
 
-		-- Remove excess segments and notify client when a visible segment is lost
-		if newFloor < prevFloor then
-			local segFolder = character:FindFirstChild("WormSegments") :: Folder?
-			if segFolder then
-				for _, seg in segFolder:GetChildren() do
-					local idx = tonumber(string.match(seg.Name, "%d+"))
-					if idx and idx > newFloor then
-						seg:Destroy()
+			-- Remove excess segments and notify client when a visible segment is lost
+			if newFloor < prevFloor then
+				local segFolder = character:FindFirstChild("WormSegments") :: Folder?
+				if segFolder then
+					for _, seg in segFolder:GetChildren() do
+						local idx = tonumber(string.match(seg.Name, "%d+"))
+						if idx and idx > newFloor then
+							seg:Destroy()
+						end
 					end
 				end
+				self.Client.WormAte:Fire(player, newFloor)
+				self:_updateLeaderstats(player, newFloor)
 			end
-			self.Client.WormAte:Fire(player, newFloor)
-			self:_updateLeaderstats(player, newFloor)
 		end
 	end
 

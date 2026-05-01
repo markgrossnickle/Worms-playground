@@ -1,18 +1,20 @@
 --!strict
--- BotInterpController — smooths bot worm rendering on the client.
+-- BotInterpController — smooths worm rendering on the client (despite the
+-- name, it now handles BOTH bot worms AND other-player worms).
 --
--- The problem: bot worm Parts are server-anchored, and the server writes
--- their CFrames at a discrete cadence (30Hz, every 2nd Heartbeat in
--- BotService). Roblox's automatic anchored-Part replication is snap-only —
+-- The problem: server-anchored worm Parts have their CFrames written at a
+-- discrete cadence (30Hz for bots in BotService, 10Hz for player worms in
+-- WormService). Roblox's automatic anchored-Part replication is snap-only —
 -- when the client receives a new CFrame it just sets it, with no
--- interpolation. So even at 30Hz updates clients see the bot teleport in
--- ~33ms steps. From a smooth camera baseline this reads as visible jumpiness.
+-- interpolation. So clients see worms teleport in 33-100ms steps. From a
+-- smooth camera baseline this reads as visible choppiness, especially
+-- with many worms on screen.
 --
 -- The fix: this controller runs every frame on the client and lerps each
--- bot Part's CFrame from where it currently is toward where the server
--- last replicated it to. Since the server writes ≤30Hz and we lerp at the
--- frame rate (≥60Hz), each replicated snap gets smoothly distributed across
--- the next ~2-3 frames instead of jumping in one frame.
+-- worm Part's CFrame from where it currently is toward where the server
+-- last replicated it to. Since the server writes infrequently and we lerp
+-- at the frame rate, each replicated snap gets smoothly distributed
+-- across the next ~2-3 frames instead of jumping in one frame.
 --
 -- Detection of "the server just replicated a new value":
 --   We track `lastWrite` per Part — the CFrame *we* most recently set.
@@ -21,11 +23,14 @@
 --   layer (anchored parts have no physics simulation). That's our new
 --   target. We then lerp `displayed → target` and write the result.
 --
--- Bots are identified by the `IsBotWorm` attribute on the Model
--- (see BotService:_createBotModel). Player worms are NOT smoothed — the
--- local player's own worm is jumpy in absolute terms but the camera
--- follows it, so the relative motion looks smooth; smoothing would
--- actually break input → camera responsiveness.
+-- We smooth: bot worms (IsBotWorm) + other-player worms (IsPlayerWorm,
+-- excluding the local player). The LOCAL player's own worm is NOT
+-- smoothed — the camera follows it, so the relative motion already looks
+-- correct, and smoothing would lag input→camera responsiveness.
+--
+-- Performance: writes are batched via workspace:BulkMoveTo with
+-- FireCFrameChanged so the per-frame cost stays flat regardless of how
+-- many worms are on screen.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -63,19 +68,29 @@ local BotInterpController = Knit.CreateController({
 	_modelTroves = {} :: { [Model]: any },
 })
 
-function BotInterpController:_isBotModel(instance: Instance): boolean
+-- Should we smooth this Model? True for: any Model with IsBotWorm
+-- (server-controlled bot), OR any Model with IsPlayerWorm that isn't the
+-- local player's own character.
+function BotInterpController:_shouldSmoothModel(instance: Instance): boolean
 	if not instance:IsA("Model") then
 		return false
 	end
-	if instance:GetAttribute("IsBotWorm") ~= true then
+	if instance:GetAttribute("IsBotWorm") then
+		-- Defensive: bot models shouldn't have a Player owner, but be safe.
+		if Players:GetPlayerFromCharacter(instance) == nil then
+			return true
+		end
 		return false
 	end
-	-- Defensive: skip if a player owns this model (shouldn't happen, but
-	-- anchored-Part tracking on a player worm would interfere with input).
-	if Players:GetPlayerFromCharacter(instance) ~= nil then
-		return false
+	if instance:GetAttribute("IsPlayerWorm") then
+		-- Skip the local player's own character — the camera tracks it
+		-- and smoothing would introduce input→camera lag.
+		local owner = Players:GetPlayerFromCharacter(instance)
+		if owner and owner ~= Players.LocalPlayer then
+			return true
+		end
 	end
-	return true
+	return false
 end
 
 function BotInterpController:_registerPart(part: BasePart)
@@ -142,17 +157,48 @@ end
 function BotInterpController:KnitInit() end
 
 function BotInterpController:KnitStart()
-	-- Register every bot already in workspace at start time.
+	-- Register every smooth-eligible model already in workspace at start.
 	for _, child in workspace:GetChildren() do
-		if self:_isBotModel(child) then
+		if self:_shouldSmoothModel(child) then
 			self:_registerModel(child :: Model)
 		end
 	end
 
-	-- Watch for bots that arrive later (per round, per spawn).
+	-- For models that arrive later, register immediately if they already
+	-- qualify; otherwise (player characters arrive in workspace BEFORE the
+	-- server sets IsPlayerWorm) subscribe to the attribute change and
+	-- register when it lands. The attribute subscription auto-cleans up
+	-- if the model leaves workspace before the attribute is set.
 	workspace.ChildAdded:Connect(function(child)
-		if self:_isBotModel(child) then
+		if self:_shouldSmoothModel(child) then
 			self:_registerModel(child :: Model)
+			return
+		end
+		if not child:IsA("Model") then
+			return
+		end
+		local owner = Players:GetPlayerFromCharacter(child)
+		if owner and owner ~= Players.LocalPlayer then
+			local attrConn: RBXScriptConnection? = nil
+			local function check()
+				if self:_shouldSmoothModel(child) then
+					self:_registerModel(child :: Model)
+					if attrConn then
+						attrConn:Disconnect()
+						attrConn = nil
+					end
+				end
+			end
+			attrConn = child:GetAttributeChangedSignal("IsPlayerWorm"):Connect(check)
+			-- Re-check now in case the attribute was set in the same frame
+			check()
+			-- Defensive cleanup if the character leaves before the tag lands
+			child.AncestryChanged:Once(function(_, parent)
+				if parent == nil and attrConn then
+					attrConn:Disconnect()
+					attrConn = nil
+				end
+			end)
 		end
 	end)
 	workspace.ChildRemoved:Connect(function(child)

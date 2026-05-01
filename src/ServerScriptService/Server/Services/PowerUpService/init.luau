@@ -365,14 +365,21 @@ function PowerUpService:ConsumeShield(ownerName: string): boolean
 	return false
 end
 
+-- SPEED is now a "free boost" powerup (see HasFreeBoost), no raw
+-- multiplier. SPEED_BURST keeps its multiplier on top of the auto-boost.
 function PowerUpService:GetSpeedMultiplier(ownerName: string): number
-	if self:HasActivePowerUp(ownerName, "SPEED") then
-		return WormConfig.PowerUpTypes.SPEED.SpeedMultiplier
-	end
 	if self:HasActivePowerUp(ownerName, "SPEED_BURST") then
 		return WormConfig.PowerUpTypes.SPEED_BURST.SpeedMultiplier
 	end
 	return 1
+end
+
+-- True if the owner has a powerup that grants unlimited boost (free
+-- segment cost + auto-engage). SPEED and SPEED_BURST both qualify —
+-- they automatically put the worm into boost speed for their duration
+-- without consuming segments.
+function PowerUpService:HasFreeBoost(ownerName: string): boolean
+	return self:HasActivePowerUp(ownerName, "SPEED") or self:HasActivePowerUp(ownerName, "SPEED_BURST")
 end
 
 function PowerUpService:GetMagnetRange(ownerName: string): number
