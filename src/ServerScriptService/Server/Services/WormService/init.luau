@@ -107,6 +107,13 @@ local WormService = Knit.CreateService({
 	-- os.clock() at last rebuild — used by RebuildCollisionGrid to dedupe
 	-- when both services try to rebuild on the same frame.
 	_collisionGridBuiltAt = 0,
+	-- Per-frame food index. Cell size 10 (≈ max magnet range / 3) means
+	-- the 9-cell neighborhood at any position covers a 30-stud radius —
+	-- larger than the 25-stud MAGNET powerup range, so no in-range food
+	-- is missed. Replaces O(N·F) per-frame iteration of all food per worm
+	-- with O(F) build + O(k) per-worm query (typically k = 1-5).
+	_foodGrid = SpatialIndex.new(10),
+	_foodGridBuiltAt = 0,
 
 	-- Signals for other services to listen to
 	PlayerKilled = Signal.new(),
@@ -1263,64 +1270,102 @@ function WormService:_checkFoodCollection(player: Player, headPos: Vector3)
 	local effectiveRange = math.max(WormConfig.PassiveMagnetRange, powerUpMagnetRange)
 	local pullSpeed = if powerUpMagnetRange > 0 then WormConfig.PowerUpMagnetPull else WormConfig.PassiveMagnetPull
 
-	-- Gate Part.Position writes to 10Hz (every 6th Heartbeat) to stay within the
-	-- "Server Brain, Client Body" replication budget. Each write auto-replicates
-	-- to every client, so at 60Hz with ~20 worms × ~5 pulled food each this was
-	-- generating up to 6,000 Part replications/s — painful on cellular.
-	-- We multiply pullSpeed by 6 to preserve the original studs/second pull rate.
-	local foodFolder = self._foodFolder :: Folder
+	-- Gate Part.Position writes to 10Hz (every 6th Heartbeat) to stay
+	-- within the "Server Brain, Client Body" replication budget.
+	-- pullSpeed is multiplied by 6 to preserve the original studs/sec rate.
 	local magnetFlush = (self._broadcastTick % 6 == 0)
-	for _, food in foodFolder:GetChildren() do
-		if food:IsA("BasePart") then
-			local diff = food.Position - headPos
-			local dist = diff.Magnitude
+	local eatRadius = WormConfig.CollisionRadius + 1
+	local eatRadiusSq = eatRadius * eatRadius
+	-- 9-cell neighborhood around the head. Cell size 10 → covers a 30-stud
+	-- radius — bigger than the 25-stud max magnet range, so no in-range
+	-- food is missed.
+	self._foodGrid:ForEachNeighbor(headPos, function(entry)
+		local food = entry.Part
+		if not food or not food.Parent then
+			return nil
+		end
+		local dx = entry.Pos.X - headPos.X
+		local dz = entry.Pos.Z - headPos.Z
+		local distSq = dx * dx + dz * dz
 
-			-- Pull nearby food toward head. Claim-tick guard avoids
-			-- double-write when multiple worms are in range of the same food.
-			if
-				magnetFlush
-				and effectiveRange > 0
-				and dist < effectiveRange
-				and dist > WormConfig.CollisionRadius + 1
-				and self:_tryClaimMagnetPull(food, self._broadcastTick)
-			then
-				local pullDir = -diff.Unit
-				food.Position = food.Position + pullDir * (pullSpeed * 6)
-			end
-
-			if dist < WormConfig.CollisionRadius + 1 then
-				-- Guard against double-consumption
-				if food:GetAttribute("Consumed") then
-					continue
-				end
-				food:SetAttribute("Consumed", true)
-				local foodValue = food:GetAttribute("FoodValue") or WormConfig.FoodValue
-				food:Destroy()
-				self._foodCount -= 1
-				local prevFloor = math.floor(wormData.Segments)
-				wormData.Segments += foodValue
-				if wormData.Segments > wormData.MaxSegments then
-					wormData.MaxSegments = wormData.Segments
-				end
-				local newFloor = math.floor(wormData.Segments)
-
-				-- Add new segment visuals for each whole segment gained
-				local character = player.Character
-				if character then
-					for i = prevFloor + 1, newFloor do
-						self:_createSegment(character, player, i, wormData.Color)
-					end
-				end
-
-				self.Client.WormAte:Fire(player, wormData.Segments)
-				self.PlayerScoreChanged:Fire(player, wormData.Segments)
-				self:_updateLeaderstats(player, wormData.Segments)
+		-- Magnet pull
+		if
+			magnetFlush
+			and effectiveRange > 0
+			and distSq < effectiveRange * effectiveRange
+			and distSq > eatRadiusSq
+			and self:_tryClaimMagnetPull(food, self._broadcastTick)
+		then
+			-- Need a 3D vector for the pull direction; fall back to the
+			-- xz-only direction since food is mostly at terrain level.
+			local foodPos = food.Position
+			local diff = foodPos - headPos
+			local mag = diff.Magnitude
+			if mag > 0.01 then
+				food.Position = foodPos - (diff / mag) * (pullSpeed * 6)
 			end
 		end
-	end
+
+		-- Eat (collision)
+		if distSq < eatRadiusSq then
+			if food:GetAttribute("Consumed") then
+				return nil
+			end
+			food:SetAttribute("Consumed", true)
+			local foodValue = food:GetAttribute("FoodValue") or WormConfig.FoodValue
+			food:Destroy()
+			self._foodCount -= 1
+			local prevFloor = math.floor(wormData.Segments)
+			wormData.Segments += foodValue
+			if wormData.Segments > wormData.MaxSegments then
+				wormData.MaxSegments = wormData.Segments
+			end
+			local newFloor = math.floor(wormData.Segments)
+			local character = player.Character
+			if character then
+				for i = prevFloor + 1, newFloor do
+					self:_createSegment(character, player, i, wormData.Color)
+				end
+			end
+			self.Client.WormAte:Fire(player, wormData.Segments)
+			self.PlayerScoreChanged:Fire(player, wormData.Segments)
+			self:_updateLeaderstats(player, wormData.Segments)
+		end
+		return nil
+	end)
 
 	-- Check power-up collection
 	PowerUpService:CollectPowerUp(player.Name, headPos)
+end
+
+-- Rebuild the food spatial grid. Indexes the workspace _foodFolder once;
+-- per-worm food checks then walk only the 9-cell neighborhood around the
+-- head. Idempotent within a frame.
+function WormService:RebuildFoodGrid()
+	local now = os.clock()
+	if (now - self._foodGridBuiltAt) < 0.005 then
+		return
+	end
+	self._foodGridBuiltAt = now
+
+	local grid = self._foodGrid
+	grid:Clear()
+
+	local foodFolder = self._foodFolder
+	if not foodFolder then
+		return
+	end
+	for _, food in foodFolder:GetChildren() do
+		if food:IsA("BasePart") then
+			grid:Insert({
+				Pos = food.Position,
+				OwnerName = "",
+				TeamIndex = 0,
+				IsHead = false,
+				Part = food,
+			})
+		end
+	end
 end
 
 -- Rebuild the shared spatial grid from cached positions. Idempotent within
@@ -1790,9 +1835,11 @@ function WormService:_gameStep(dt: number)
 		self:_spawnFoodBatch(toSpawn)
 	end
 
-	-- Rebuild the shared spatial grid for this frame's collision/AI checks.
-	-- Idempotent — if BotService already rebuilt this frame, this is a no-op.
+	-- Rebuild the shared spatial grids for this frame's collision/food
+	-- checks. Both are idempotent — if BotService already rebuilt this
+	-- frame the calls no-op.
 	self:RebuildCollisionGrid(self._botService)
+	self:RebuildFoodGrid()
 
 	-- Update all alive worms
 	for player, wormData in self._worms do

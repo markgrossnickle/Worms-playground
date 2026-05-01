@@ -1805,11 +1805,6 @@ function BotService:_updateBotSegments(botData: BotData)
 end
 
 function BotService:_checkBotFoodCollection(botData: BotData)
-	local hrp = botData.Model:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return
-	end
-
 	-- Use server-side source of truth (HRP is only flushed at 10Hz).
 	local headPos = botData.HeadPosition
 
@@ -1821,54 +1816,54 @@ function BotService:_checkBotFoodCollection(botData: BotData)
 	local effectiveRange = math.max(WormConfig.PassiveMagnetRange, powerUpMagnetRange)
 	local pullSpeed = if powerUpMagnetRange > 0 then WormConfig.PowerUpMagnetPull else WormConfig.PassiveMagnetPull
 
-	local foodFolder = WormService._foodFolder :: Folder?
-	if not foodFolder then
-		return
-	end
-
-	-- Gate Part.Position writes to 10Hz (every 6th Heartbeat) to stay within the
-	-- "Server Brain, Client Body" replication budget. Mirrors the logic in
-	-- WormService:_checkFoodCollection — pullSpeed is 6× to preserve stud/s rate.
-	-- Use WormService's broadcast tick (not this service's) so the claim-tick
-	-- guard correlates with the player-magnet pass running in the same frame.
+	-- Gate Part.Position writes to 10Hz to stay within the replication
+	-- budget. Use WormService's broadcast tick so the claim-tick guard
+	-- correlates with the player magnet pass running in the same frame.
 	local magnetFlush = (self._broadcastTick % 6 == 0)
 	local magnetTick = WormService._broadcastTick
-	for _, food in foodFolder:GetChildren() do
-		if food:IsA("BasePart") then
-			local diff = food.Position - headPos
-			local dist = diff.Magnitude
+	local eatRadius = WormConfig.CollisionRadius + 1
+	local eatRadiusSq = eatRadius * eatRadius
+	WormService._foodGrid:ForEachNeighbor(headPos, function(entry)
+		local food = entry.Part
+		if not food or not food.Parent then
+			return nil
+		end
+		local dx = entry.Pos.X - headPos.X
+		local dz = entry.Pos.Z - headPos.Z
+		local distSq = dx * dx + dz * dz
 
-			-- Pull nearby food toward head. Shared claim-tick guard with
-			-- WormService prevents the same food being Position-replicated
-			-- twice in one tick when both a player and a bot are in range.
-			if
-				magnetFlush
-				and effectiveRange > 0
-				and dist < effectiveRange
-				and dist > WormConfig.CollisionRadius + 1
-				and WormService:_tryClaimMagnetPull(food, magnetTick)
-			then
-				local pullDir = -diff.Unit
-				food.Position = food.Position + pullDir * (pullSpeed * 6)
-			end
-
-			if dist < WormConfig.CollisionRadius + 1 then
-				local foodValue = food:GetAttribute("FoodValue") or WormConfig.FoodValue
-				if WormService:ConsumeFood(food) then
-					local prevFloor = math.floor(botData.Segments)
-					botData.Segments += foodValue
-					if botData.Segments > botData.MaxSegments then
-						botData.MaxSegments = botData.Segments
-					end
-					local newFloor = math.floor(botData.Segments)
-					for i = prevFloor + 1, newFloor do
-						self:_createSegment(botData, i)
-					end
-					WormService:UpdateBotSegments(botData.Name, newFloor)
-				end
+		if
+			magnetFlush
+			and effectiveRange > 0
+			and distSq < effectiveRange * effectiveRange
+			and distSq > eatRadiusSq
+			and WormService:_tryClaimMagnetPull(food, magnetTick)
+		then
+			local foodPos = food.Position
+			local diff = foodPos - headPos
+			local mag = diff.Magnitude
+			if mag > 0.01 then
+				food.Position = foodPos - (diff / mag) * (pullSpeed * 6)
 			end
 		end
-	end
+
+		if distSq < eatRadiusSq then
+			local foodValue = food:GetAttribute("FoodValue") or WormConfig.FoodValue
+			if WormService:ConsumeFood(food) then
+				local prevFloor = math.floor(botData.Segments)
+				botData.Segments += foodValue
+				if botData.Segments > botData.MaxSegments then
+					botData.MaxSegments = botData.Segments
+				end
+				local newFloor = math.floor(botData.Segments)
+				for i = prevFloor + 1, newFloor do
+					self:_createSegment(botData, i)
+				end
+				WormService:UpdateBotSegments(botData.Name, newFloor)
+			end
+		end
+		return nil
+	end)
 end
 
 function BotService:_checkBotCollisions(botData: BotData)
@@ -2072,9 +2067,10 @@ function BotService:KnitStart()
 		self._broadcastTick += 1
 		local now = os.clock()
 
-		-- Rebuild the shared collision grid for this frame. Idempotent —
-		-- if WormService already rebuilt this same frame, this no-ops.
+		-- Rebuild the shared spatial grids for this frame. Idempotent —
+		-- if WormService already rebuilt this same frame, these no-op.
 		WormService:RebuildCollisionGrid(self)
+		WormService:RebuildFoodGrid()
 
 		-- Collect bot names first to avoid modifying table during iteration
 		local botNames = {}

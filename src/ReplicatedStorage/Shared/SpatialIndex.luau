@@ -29,6 +29,10 @@ export type Entry = {
 	OwnerName: string, -- worm/bot name; used for self-skip and team check
 	TeamIndex: number, -- 0 if no team; non-zero matches WormConfig.TeamColors index
 	IsHead: boolean, -- true for head, false for body segment
+	-- Optional underlying Part reference. Worm entries set this nil (we
+	-- don't reach back to the Part); food entries set it to the food Part
+	-- so collection code can :Destroy() / read attributes after a hit.
+	Part: BasePart?,
 }
 
 export type SpatialIndex = typeof(setmetatable(
