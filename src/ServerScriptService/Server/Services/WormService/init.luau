@@ -125,6 +125,7 @@ local WormService = Knit.CreateService({
 	PlayerKilled = Signal.new(),
 	PlayerDied = Signal.new(), -- Fires for ALL player deaths (name, killerName?)
 	PlayerScoreChanged = Signal.new(),
+	WormSpawnedServer = Signal.new(), -- (player: Player)
 })
 
 --------------------------------------------------
@@ -929,6 +930,7 @@ function WormService:_spawnWorm(player: Player)
 		SpawnProtectionDuration = WormConfig.WormKing.SpawnProtectionDuration,
 		TeamIndex = teamIndex or 0,
 	})
+	self.WormSpawnedServer:Fire(player)
 end
 
 function WormService:_killWorm(player: Player, killer: Player?, killerBotName: string?)
